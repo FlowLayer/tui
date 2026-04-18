@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -655,7 +656,7 @@ func (model model) View() string {
 	// Each sub-region is already filled to exact width with its own bg.
 	// Join them and apply a final safety fill for the full surface.
 	content := header + "\n" + body + "\n" + footer
-	return fillBg(content, width, height, colorBackground)
+	return ensureBackgroundConsistency(fillBg(content, width, height, colorBackground))
 }
 
 func (model model) renderHeader(width int) string {
@@ -1935,6 +1936,39 @@ func fillBg(content string, width, height int, bg lipgloss.TerminalColor) string
 		}
 	}
 	return strings.Join(out, "\n")
+}
+
+// bgResetSeq is the ANSI SGR sequence that re-establishes the application
+// background color.  It is injected after every \x1b[0m reset in the final
+// View output so that no cell in the terminal buffer relies on the terminal's
+// default background (which can revert to black after a tab switch in VS Code).
+var bgResetSeq = func() string {
+	hex := strings.TrimPrefix(string(colorBackground), "#")
+	if len(hex) != 6 {
+		return ""
+	}
+	r, _ := strconv.ParseUint(hex[0:2], 16, 8)
+	g, _ := strconv.ParseUint(hex[2:4], 16, 8)
+	b, _ := strconv.ParseUint(hex[4:6], 16, 8)
+	return fmt.Sprintf("\x1b[48;2;%d;%d;%dm", r, g, b)
+}()
+
+// ensureBackgroundConsistency re-establishes the application background after
+// every ANSI SGR reset (\x1b[0m) in the final View output.
+//
+// Problem: terminals such as VS Code's integrated terminal (xterm.js) revert
+// cells to their native default background when the tab loses and regains
+// focus.  Any cell whose last SGR state is a bare reset will turn black,
+// breaking the intended background color in empty/padding regions.
+//
+// Fix: after each reset we immediately re-apply the app background via a
+// true-color SGR sequence, so no cell ever relies on the terminal's default.
+// This is an intentional, permanent corrective measure — not a temporary hack.
+func ensureBackgroundConsistency(s string) string {
+	if bgResetSeq == "" {
+		return s
+	}
+	return strings.ReplaceAll(s, "\x1b[0m", "\x1b[0m"+bgResetSeq)
 }
 
 // bgSpace returns n space characters explicitly styled with the given
