@@ -10,9 +10,27 @@ A running FlowLayer instance is required. The TUI connects over WebSocket and pr
 
 ---
 
-## Quick Start
+## Installation
 
-Run from this directory:
+Download the prebuilt binary from [GitHub Releases](https://github.com/FlowLayer/tui/releases).
+
+Run the TUI:
+
+```bash
+./flowlayer-tui -addr 127.0.0.1:3000
+```
+
+With auth token:
+
+```bash
+./flowlayer-tui -addr 127.0.0.1:3000 -token <bearer-token>
+```
+
+---
+
+## Development
+
+Run the TUI from source (development mode):
 
 ```bash
 go run . -addr 127.0.0.1:3000
