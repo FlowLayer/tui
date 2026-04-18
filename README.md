@@ -1,12 +1,32 @@
-FlowLayer TUI
+# FlowLayer TUI
 
-Developer-first terminal client for local observability and operation of a running FlowLayer runtime.
+Terminal client for observing and operating a running [FlowLayer](https://flowlayer.tech/) runtime.
 
-The TUI is not just a control screen. It provides a deterministic local observability view (snapshot + live + replay) to understand distributed service interactions during development.
+- **Website**: [flowlayer.tech](https://flowlayer.tech/)
+- **FlowLayer runtime**: [github.com/FlowLayer/flowlayer](https://github.com/FlowLayer/flowlayer)
+- **Protocol spec**: [PROTOCOL.md](https://github.com/FlowLayer/flowlayer/blob/main/PROTOCOL.md)
+
+A running FlowLayer instance is required. The TUI connects over WebSocket and provides a deterministic local view (snapshot + live events + replay) of distributed service interactions during development.
 
 ---
 
-What This TUI Is
+## Quick Start
+
+Run from this directory:
+
+```bash
+go run . -addr 127.0.0.1:3000
+```
+
+With auth token:
+
+```bash
+go run . -addr 127.0.0.1:3000 -token <bearer-token>
+```
+
+---
+
+## What This TUI Is
 
 - A thin client over the FlowLayer WebSocket protocol (`/ws`)
 - A local observability client for distributed-system development
@@ -24,11 +44,13 @@ All business truth stays in the FlowLayer runtime.
 
 ---
 
-Runtime Relationship
+## Relationship with FlowLayer
 
-The TUI keeps local UI state only (selection, filters, busy hints, footer messages, connection label).
+This repository contains only the terminal client (TUI). It is a read-only observer and command sender.
 
-Service truth comes from runtime messages:
+The [FlowLayer runtime](https://github.com/FlowLayer/flowlayer) is the source of truth for service state, log storage, and lifecycle management. The TUI connects to a running instance via the [WebSocket protocol](https://github.com/FlowLayer/flowlayer/blob/main/PROTOCOL.md) and does not embed any runtime logic.
+
+The TUI keeps local UI state only (selection, filters, busy hints, footer messages, connection label). Service truth comes from runtime messages:
 
 - `snapshot` for the current full view
 - `service_status` for live state changes
@@ -36,11 +58,9 @@ Service truth comes from runtime messages:
 
 Command results are used for user feedback, not for inventing service state.
 
-The TUI view is a local working window for current investigation, not a complete historical dataset.
-
 ---
 
-Real Architecture
+## Architecture
 
 Connection and message flow:
 
@@ -54,7 +74,7 @@ There is no HTTP/SSE control path in the current TUI.
 
 ---
 
-Log Model
+## Log Model
 
 Logs are modeled around a global sequence id:
 
@@ -79,7 +99,7 @@ Implication: this is more than a passive stream viewer. The TUI merges live + re
 
 ---
 
-Log Consumption Model
+## Log Consumption Model
 
 The TUI is a pure consumer of the server's log contract. It does not compute, configure, or infer log limits.
 
@@ -101,7 +121,7 @@ The server is the default authority for log limits. The TUI defers entirely to `
 
 ---
 
-Log Limit Contract
+## Log Limit Contract
 
 - The server decides log limits based on its configuration and built-in defaults.
 - A client may override the server policy by providing an explicit `limit` in the request.
@@ -109,7 +129,7 @@ Log Limit Contract
 
 ---
 
-Reconnect Behavior
+## Reconnect Behavior
 
 WebSocket reconnect is handled with exponential backoff in the client layer:
 
@@ -129,7 +149,7 @@ For reconnectable or long-lived sessions, `after_seq` is effectively required fo
 
 ---
 
-Volume and Memory
+## Volume and Memory
 
 The TUI maintains an in-memory working window of log entries.
 
@@ -144,7 +164,7 @@ The TUI does not enforce its own retention cap. All retention decisions are driv
 
 ---
 
-Observability Positioning
+## Observability Positioning
 
 The TUI is not only a log viewer and not only a control UI.
 
@@ -155,7 +175,7 @@ The TUI is not only a log viewer and not only a control UI.
 
 ---
 
-Keybindings
+## Keybindings
 
 Global:
 
@@ -178,7 +198,7 @@ Actions:
 
 ---
 
-Non-Goals
+## Non-Goals
 
 The TUI deliberately does not provide:
 
@@ -189,36 +209,6 @@ The TUI deliberately does not provide:
 
 ---
 
-Quick Start
+## License
 
-Run from this directory:
-
-```bash
-go run . -addr 127.0.0.1:3000
-```
-
-With auth token:
-
-```bash
-go run . -addr 127.0.0.1:3000 -token <bearer-token>
-```
-
----
-
-Summary
-
-FlowLayer TUI is a thin WebSocket client that combines:
-
-- runtime state visibility (`snapshot` + `service_status`)
-- live logs
-- replay continuity (`get_logs` + `after_seq` + `seq` dedup)
-
-It should be used as a local operational observability window, not as a complete history store.
-
-It is designed for real development-time observability of local distributed systems, while keeping runtime authority and durability concerns in the FlowLayer backend.
-
----
-
-License
-
-TBD
+MIT
