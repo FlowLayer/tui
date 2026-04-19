@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/FlowLayer/client/wsclient"
 	"github.com/charmbracelet/bubbles/help"
@@ -75,6 +76,7 @@ type headerKeyMap struct {
 	navigate    key.Binding
 	filter      key.Binding
 	closeFilter key.Binding
+	connection  key.Binding
 	quit        key.Binding
 }
 
@@ -96,6 +98,10 @@ func newHeaderKeyMap() headerKeyMap {
 			key.WithKeys("esc"),
 			key.WithHelp("esc", "close filter"),
 		),
+		connection: key.NewBinding(
+			key.WithKeys("i"),
+			key.WithHelp("i", "conn info"),
+		),
 		quit: key.NewBinding(
 			key.WithKeys("q"),
 			key.WithHelp("q", "quit"),
@@ -104,7 +110,7 @@ func newHeaderKeyMap() headerKeyMap {
 }
 
 func (keys headerKeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{keys.switchPanel, keys.navigate, keys.filter, keys.closeFilter, keys.quit}
+	return []key.Binding{keys.switchPanel, keys.navigate, keys.filter, keys.closeFilter, keys.connection, keys.quit}
 }
 
 func (keys headerKeyMap) LongHelp() [][]key.Binding {
@@ -131,6 +137,27 @@ var (
 	headerShortcutsStyle = lipgloss.NewStyle().
 				Foreground(colorTextMuted).
 				Background(colorPanelBackground)
+
+	connectionInfoModalFrameStyle = lipgloss.NewStyle().
+					Border(lipgloss.RoundedBorder()).
+					BorderForeground(colorSelectedPanelBorder).
+					BorderBackground(colorBackground).
+					Background(colorPanelBackground).
+					Foreground(colorTextDefault).
+					Padding(1, 2)
+
+	connectionInfoModalTitleStyle = lipgloss.NewStyle().
+					Bold(true).
+					Foreground(colorSelectedPanelTitle).
+					Background(colorPanelBackground)
+
+	connectionInfoModalLabelStyle = lipgloss.NewStyle().
+					Foreground(colorTextMuted).
+					Background(colorPanelBackground)
+
+	connectionInfoModalHintStyle = lipgloss.NewStyle().
+					Foreground(colorTextMuted).
+					Background(colorPanelBackground)
 
 	footerStyle = lipgloss.NewStyle().
 			Foreground(colorTextMuted).
@@ -214,6 +241,7 @@ type model struct {
 	height int
 
 	connectionLabel      string
+	showConnectionInfo   bool
 	focus                panelFocus
 	serviceItems         []serviceItem
 	serviceSelection     int
@@ -349,6 +377,7 @@ func (model model) fetchReplayLogsCmd(afterSeq int64) tea.Cmd {
 func (model model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	var shouldQuit bool
 	var messageCmd tea.Cmd
+	var skipViewportUpdate bool
 
 	selectedBefore := model.selectedServiceName()
 
@@ -493,7 +522,18 @@ func (model model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			model.clearTransientFooter()
 		}
 	case tea.KeyMsg:
+		if model.showConnectionInfo {
+			skipViewportUpdate = true
+			if message.String() == "i" || message.Type == tea.KeyEsc {
+				model.showConnectionInfo = false
+			}
+			break
+		}
+
 		switch message.String() {
+		case "i":
+			model.showConnectionInfo = true
+			skipViewportUpdate = true
 		case "q", "ctrl+c":
 			shouldQuit = true
 		case "tab":
@@ -504,6 +544,10 @@ func (model model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				model.focus = focusLeft
 				model.logsFilterEdit = false
 			}
+		}
+
+		if model.showConnectionInfo {
+			break
 		}
 
 		if model.serviceFilterEdit {
@@ -609,16 +653,20 @@ func (model model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	model.setLogsViewportKeyHandling(model.focus == focusRight && !model.logsFilterEdit)
-	updatedViewport, viewportCmd := model.logsViewport.Update(message)
-	model.logsViewport = updatedViewport
+	model.setLogsViewportKeyHandling(model.focus == focusRight && !model.logsFilterEdit && !model.showConnectionInfo)
+	var viewportCmd tea.Cmd
+	if !skipViewportUpdate {
+		updatedViewport, command := model.logsViewport.Update(message)
+		model.logsViewport = updatedViewport
+		viewportCmd = command
 
-	if keyMessage, ok := message.(tea.KeyMsg); ok {
-		if model.focus == focusRight {
-			switch keyMessage.String() {
-			case "down":
-				if model.logsViewport.AtBottom() {
-					model.logsFollow = true
+		if keyMessage, ok := message.(tea.KeyMsg); ok {
+			if model.focus == focusRight {
+				switch keyMessage.String() {
+				case "down":
+					if model.logsViewport.AtBottom() {
+						model.logsFollow = true
+					}
 				}
 			}
 		}
@@ -656,7 +704,250 @@ func (model model) View() string {
 	// Each sub-region is already filled to exact width with its own bg.
 	// Join them and apply a final safety fill for the full surface.
 	content := header + "\n" + body + "\n" + footer
-	return ensureBackgroundConsistency(fillBg(content, width, height, colorBackground))
+	surface := fillBg(content, width, height, colorBackground)
+	if model.showConnectionInfo {
+		surface = overlayPlaced(surface, model.renderConnectionInfoModal(width), width, height)
+	}
+
+	return ensureBackgroundConsistency(surface)
+}
+
+func (model model) renderConnectionInfoModal(totalWidth int) string {
+	const (
+		connectionInfoModalMaxWidth             = 64
+		connectionInfoModalPreferredOuterMargin = 8  // Keep roughly 4 cells of surrounding context on each side.
+		connectionInfoModalMinimumReadableWidth = 34 // Below this, fallback to near full width to preserve readability.
+		connectionInfoModalHorizontalChrome     = 6  // Border (1+1) + horizontal padding (2+2).
+	)
+
+	modalWidth := totalWidth - connectionInfoModalPreferredOuterMargin
+	if modalWidth > connectionInfoModalMaxWidth {
+		modalWidth = connectionInfoModalMaxWidth
+	}
+	if modalWidth < connectionInfoModalMinimumReadableWidth {
+		modalWidth = totalWidth - 2
+	}
+	if modalWidth < 1 {
+		modalWidth = 1
+	}
+
+	innerWidth := maxInt(1, modalWidth-connectionInfoModalHorizontalChrome)
+
+	addressValue := strings.TrimSpace(model.addr)
+	if addressValue == "" {
+		addressValue = "(none)"
+	}
+
+	tokenValue := strings.TrimSpace(model.token)
+	if tokenValue == "" {
+		tokenValue = "(none)"
+	}
+
+	statusValue := strings.TrimSpace(model.connectionLabel)
+	if statusValue == "" {
+		statusValue = "(unknown)"
+	}
+
+	lines := []string{
+		connectionInfoModalTitleStyle.Render(fitLine("Connection Info", innerWidth)),
+		"",
+		renderConnectionInfoRow("Address", addressValue, innerWidth),
+		renderConnectionInfoRow("Token", tokenValue, innerWidth),
+		renderConnectionInfoRow("Status", statusValue, innerWidth),
+		"",
+		connectionInfoModalHintStyle.Render(fitLine("i / esc  close", innerWidth)),
+	}
+
+	content := strings.Join(lines, "\n")
+	return connectionInfoModalFrameStyle.
+		Width(modalWidth).
+		Render(content)
+}
+
+func renderConnectionInfoRow(label, value string, width int) string {
+	const connectionInfoModalLabelWidth = 7 // "Address" is the longest label and defines the fixed column.
+
+	valueText := sanitizeConnectionInfoValue(strings.TrimSpace(value))
+
+	labelCell := connectionInfoModalLabelStyle.
+		Width(connectionInfoModalLabelWidth).
+		MaxWidth(connectionInfoModalLabelWidth).
+		Render(fitLine(label, connectionInfoModalLabelWidth))
+
+	valueWidth := maxInt(1, width-connectionInfoModalLabelWidth-2)
+	valueCell := fitLine(valueText, valueWidth)
+
+	return fillBg(labelCell+bgSpace(2, colorPanelBackground)+valueCell, width, 0, colorPanelBackground)
+}
+
+// sanitizeConnectionInfoValue strips ANSI CSI escape sequences (ESC [ ... final byte).
+// This is intentionally scoped to CSI for current modal usage.
+func sanitizeConnectionInfoValue(value string) string {
+	if value == "" {
+		return ""
+	}
+
+	var out strings.Builder
+
+	for index := 0; index < len(value); {
+		next, ok := ansiEscapeEnd(value, index)
+		if ok {
+			index = next
+			continue
+		}
+
+		r, size := utf8.DecodeRuneInString(value[index:])
+		if r == utf8.RuneError && size == 0 {
+			break
+		}
+
+		out.WriteRune(r)
+		index += size
+	}
+
+	return out.String()
+}
+
+func overlayPlaced(base, overlay string, width, height int) string {
+	if width <= 0 || height <= 0 {
+		return base
+	}
+
+	overlayWidth := lipgloss.Width(overlay)
+	overlayHeight := lipgloss.Height(overlay)
+	if overlayWidth <= 0 || overlayHeight <= 0 {
+		return base
+	}
+
+	baseLines := strings.Split(fillBg(base, width, height, colorBackground), "\n")
+
+	if overlayWidth > width {
+		overlayWidth = width
+	}
+	if overlayHeight > height {
+		overlayHeight = height
+	}
+
+	xOffset := 0
+	if width > overlayWidth {
+		xOffset = (width - overlayWidth) / 2
+	}
+	yOffset := 0
+	if height > overlayHeight {
+		yOffset = (height - overlayHeight) / 2
+	}
+
+	overlayLines := strings.Split(fillBg(overlay, overlayWidth, overlayHeight, colorPanelBackground), "\n")
+
+	for row := 0; row < overlayHeight; row++ {
+		baseRow := yOffset + row
+		if baseRow < 0 || baseRow >= len(baseLines) || row >= len(overlayLines) {
+			continue
+		}
+
+		center := overlayLines[row]
+		centerWidth := lipgloss.Width(center)
+		if centerWidth < overlayWidth {
+			center = fillBg(center, overlayWidth, 0, colorPanelBackground)
+			centerWidth = overlayWidth
+		}
+		if centerWidth > overlayWidth {
+			center = sliceStyledByWidth(center, 0, overlayWidth)
+			centerWidth = overlayWidth
+		}
+
+		prefix := sliceStyledByWidth(baseLines[baseRow], 0, xOffset)
+		suffixStart := xOffset + centerWidth
+		if suffixStart > width {
+			suffixStart = width
+		}
+		suffix := sliceStyledByWidth(baseLines[baseRow], suffixStart, width)
+		baseLines[baseRow] = fillBg(prefix+center+suffix, width, 0, colorBackground)
+	}
+
+	return strings.Join(baseLines, "\n")
+}
+
+func sliceStyledByWidth(line string, start, end int) string {
+	if start < 0 {
+		start = 0
+	}
+	if end <= start {
+		return ""
+	}
+
+	visible := 0
+	index := 0
+	capturing := false
+
+	var prefixEsc strings.Builder
+	var out strings.Builder
+
+	for index < len(line) {
+		next, ok := ansiEscapeEnd(line, index)
+		if ok {
+			seq := line[index:next]
+			if capturing {
+				out.WriteString(seq)
+			} else {
+				prefixEsc.WriteString(seq)
+			}
+			index = next
+			continue
+		}
+
+		r, size := utf8.DecodeRuneInString(line[index:])
+		if r == utf8.RuneError && size == 0 {
+			break
+		}
+
+		runeWidth := lipgloss.Width(string(r))
+		nextVisible := visible + runeWidth
+
+		if !capturing && nextVisible > start {
+			capturing = true
+			out.WriteString(prefixEsc.String())
+		}
+
+		if capturing {
+			if visible >= end {
+				break
+			}
+			if nextVisible > start && visible < end {
+				out.WriteRune(r)
+			}
+		}
+
+		visible = nextVisible
+		index += size
+
+		if visible >= end && capturing {
+			break
+		}
+	}
+
+	if !capturing {
+		return ""
+	}
+
+	out.WriteString("\x1b[0m")
+	return out.String()
+}
+
+func ansiEscapeEnd(line string, start int) (int, bool) {
+	if start+1 >= len(line) || line[start] != '\x1b' || line[start+1] != '[' {
+		return 0, false
+	}
+
+	index := start + 2
+	for index < len(line) {
+		if line[index] >= 0x40 && line[index] <= 0x7e {
+			return index + 1, true
+		}
+		index++
+	}
+
+	return len(line), true
 }
 
 func (model model) renderHeader(width int) string {
