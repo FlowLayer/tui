@@ -8,8 +8,6 @@
 *.so
 *.dylib
 
-# Local CLI binary produced by `go build ./cmd/flowlayer`
-/flowlayer-tui
 /tui
 
 # Test binary, built with `go test -c`
