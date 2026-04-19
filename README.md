@@ -154,15 +154,15 @@ What the TUI does:
    - trim the visible log buffer to that size
    - control live log retention in memory
 
-The server is the default authority for log limits. The TUI defers entirely to `effective_limit` for all retention and display decisions.
+The server defines the default log limit policy. The TUI defers entirely to `effective_limit` for all retention and display decisions.
 
 ---
 
 ## Log Limit Contract
 
-- The server decides log limits based on its configuration and built-in defaults.
-- A client may override the server policy by providing an explicit `limit` in the request.
-- Consumers must rely on `effective_limit` in the response as the sole source of truth for the applied limit.
+Normative contract details live in [PROTOCOL.md](https://github.com/FlowLayer/flowlayer/blob/main/PROTOCOL.md).
+
+For this TUI: it does not send `limit`, and it always applies `effective_limit` returned by the server.
 
 ---
 
