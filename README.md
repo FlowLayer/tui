@@ -24,19 +24,19 @@ Download the prebuilt binary from [GitHub Releases](https://github.com/FlowLayer
 Run the TUI:
 
 ```bash
-./flowlayer-tui -addr 127.0.0.1:6999
+./flowlayer-client-tui -addr 127.0.0.1:6999
 ```
 
 With auth token:
 
 ```bash
-./flowlayer-tui -addr 127.0.0.1:6999 -token <bearer-token>
+./flowlayer-client-tui -addr 127.0.0.1:6999 -token <bearer-token>
 ```
 
 Recommended when `session.bind` and `session.token` are configured on the server:
 
 ```bash
-./flowlayer-tui -config /path/to/flowlayer.jsonc
+./flowlayer-client-tui -config /path/to/flowlayer.jsonc
 ```
 
 ---
@@ -133,11 +133,13 @@ Global:
 - `q`: quit
 - `tab`: switch focus between services panel and logs panel
 - `/`: start filter edit on the focused panel
-- `esc`: leave filter edit mode
+- `esc`: close filter or modal
+- `i`: connection info modal (shows address, token, connection status)
 
 Navigation:
 
 - `up` / `down`: move service selection (left panel) or scroll logs (right panel)
+- `pgup` / `pgdown`: scroll logs by page
 
 Actions:
 
