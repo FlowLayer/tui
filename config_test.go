@@ -18,11 +18,11 @@ func writeTempFlowLayerConfig(t *testing.T, raw string) string {
 	return configPath
 }
 
-func TestResolveRuntimeOptionsLoadsConfigFromConfigFlag(t *testing.T) {
+func TestResolveRuntimeOptionsUsesSessionAddrFromConfig(t *testing.T) {
 	configPath := writeTempFlowLayerConfig(t, `{
 	  // shared flowlayer config used by multiple clients
 	  "session": {
-	    "bind": "127.0.0.1:7999",
+	    "addr": "127.0.0.1:7999",
 	    "token": "cfg-token"
 	  },
 	  "services": {
@@ -54,7 +54,7 @@ func TestResolveRuntimeOptionsLoadsConfigFromConfigFlag(t *testing.T) {
 func TestResolveRuntimeOptionsFlagsOverrideConfig(t *testing.T) {
 	configPath := writeTempFlowLayerConfig(t, `{
 	  "session": {
-	    "bind": "127.0.0.1:7999",
+	    "addr": "127.0.0.1:7999",
 	    "token": "cfg-token"
 	  },
 	  "services": {
@@ -95,7 +95,7 @@ func TestResolveRuntimeOptionsUsesFallbackWithoutConfig(t *testing.T) {
 func TestResolveRuntimeOptionsRejectsTopLevelLogViewField(t *testing.T) {
 	configPath := writeTempFlowLayerConfig(t, `{
 	  "session": {
-	    "bind": "127.0.0.1:7999",
+	    "addr": "127.0.0.1:7999",
 	    "token": "cfg-token"
 	  },
 	  "logView": {
@@ -124,7 +124,7 @@ func TestResolveRuntimeOptionsRejectsTopLevelLogViewField(t *testing.T) {
 func TestResolveRuntimeOptionsRejectsServiceLogViewField(t *testing.T) {
 	configPath := writeTempFlowLayerConfig(t, `{
 	  "session": {
-	    "bind": "127.0.0.1:7999",
+	    "addr": "127.0.0.1:7999",
 	    "token": "cfg-token"
 	  },
 	  "services": {
