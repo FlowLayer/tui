@@ -51,60 +51,10 @@ func TestResolveRuntimeOptionsUsesSessionAddrFromConfig(t *testing.T) {
 	}
 }
 
-func TestResolveRuntimeOptionsSessionAddrHasPriorityOverSessionBind(t *testing.T) {
-	configPath := writeTempFlowLayerConfig(t, `{
-	  "session": {
-	    "addr": "127.0.0.1:7999",
-	    "bind": "127.0.0.1:7000",
-	    "token": "cfg-token"
-	  },
-	  "services": {
-	    "billing": {
-	      "cmd": "npm run billing",
-	      "port": 3002
-	    }
-	  }
-	}`)
-
-	options, err := resolveRuntimeOptions(configPath, "", false, "", false)
-	if err != nil {
-		t.Fatalf("resolve runtime options: %v", err)
-	}
-
-	if options.addr != "127.0.0.1:7999" {
-		t.Fatalf("addr = %q, want %q", options.addr, "127.0.0.1:7999")
-	}
-}
-
-func TestResolveRuntimeOptionsUsesSessionBindFallback(t *testing.T) {
-	configPath := writeTempFlowLayerConfig(t, `{
-	  "session": {
-	    "bind": "127.0.0.1:7999",
-	    "token": "cfg-token"
-	  },
-	  "services": {
-	    "billing": {
-	      "cmd": "npm run billing",
-	      "port": 3002
-	    }
-	  }
-	}`)
-
-	options, err := resolveRuntimeOptions(configPath, "", false, "", false)
-	if err != nil {
-		t.Fatalf("resolve runtime options: %v", err)
-	}
-
-	if options.addr != "127.0.0.1:7999" {
-		t.Fatalf("addr = %q, want %q", options.addr, "127.0.0.1:7999")
-	}
-}
-
 func TestResolveRuntimeOptionsFlagsOverrideConfig(t *testing.T) {
 	configPath := writeTempFlowLayerConfig(t, `{
 	  "session": {
 	    "addr": "127.0.0.1:7999",
-	    "bind": "127.0.0.1:7000",
 	    "token": "cfg-token"
 	  },
 	  "services": {
@@ -145,7 +95,7 @@ func TestResolveRuntimeOptionsUsesFallbackWithoutConfig(t *testing.T) {
 func TestResolveRuntimeOptionsRejectsTopLevelLogViewField(t *testing.T) {
 	configPath := writeTempFlowLayerConfig(t, `{
 	  "session": {
-	    "bind": "127.0.0.1:7999",
+	    "addr": "127.0.0.1:7999",
 	    "token": "cfg-token"
 	  },
 	  "logView": {
@@ -174,7 +124,7 @@ func TestResolveRuntimeOptionsRejectsTopLevelLogViewField(t *testing.T) {
 func TestResolveRuntimeOptionsRejectsServiceLogViewField(t *testing.T) {
 	configPath := writeTempFlowLayerConfig(t, `{
 	  "session": {
-	    "bind": "127.0.0.1:7999",
+	    "addr": "127.0.0.1:7999",
 	    "token": "cfg-token"
 	  },
 	  "services": {
