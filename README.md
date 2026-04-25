@@ -39,6 +39,16 @@ Recommended when `session.addr` and `session.token` are configured:
 ./flowlayer-client-tui -config /path/to/flowlayer.jsonc
 ```
 
+## CLI
+
+- Bare invocation launches the TUI.
+- `-h` / `--help`: print help and exit.
+- `--version`: print `flowlayer-client-tui 1.0.0` and exit.
+- `-v` is not supported.
+- Unknown flags or positional arguments print `Error: <message>`, then the full help, and exit 2.
+- `NO_COLOR` disables red error coloring.
+- Official page: https://flowlayer.tech/tui/
+
 ---
 
 ## Development
