@@ -9,6 +9,7 @@
 *.dylib
 
 /tui
+/flowlayer-client-tui
 /release.sh
 
 # Test binary, built with `go test -c`
