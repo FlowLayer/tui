@@ -27,6 +27,7 @@ type flowLayerConfig struct {
 }
 
 type flowLayerSessionConfig struct {
+	Addr  string `json:"addr,omitempty"`
 	Bind  string `json:"bind,omitempty"`
 	Token string `json:"token,omitempty"`
 }
@@ -54,7 +55,10 @@ func resolveRuntimeOptions(configPath string, addrFlagValue string, addrFlagProv
 			return runtimeOptions{}, err
 		}
 
-		if bind := strings.TrimSpace(cfg.Session.Bind); bind != "" {
+		if addr := strings.TrimSpace(cfg.Session.Addr); addr != "" {
+			options.addr = addr
+		} else if bind := strings.TrimSpace(cfg.Session.Bind); bind != "" {
+			// Keep session.bind as a compatibility fallback from historical server config.
 			options.addr = bind
 		}
 		options.token = strings.TrimSpace(cfg.Session.Token)

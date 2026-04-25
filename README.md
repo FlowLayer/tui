@@ -13,7 +13,9 @@ The TUI connects over WebSocket and provides a deterministic local view (snapsho
 Connection modes:
 
 - Manual mode: pass `-addr` and `-token` explicitly.
-- Config mode (recommended): pass `-config <path>` and let the TUI read `session.bind` and `session.token` from the server config.
+- Config mode (recommended): pass `-config <path>` and let the TUI read `session.addr` (preferred) and `session.token`.
+
+`session.bind` belongs to the server config and represents the server listen address. The TUI still reads `session.bind` as a compatibility fallback when `session.addr` is not set.
 
 ---
 
@@ -33,7 +35,7 @@ With auth token:
 ./flowlayer-client-tui -addr 127.0.0.1:6999 -token <bearer-token>
 ```
 
-Recommended when `session.bind` and `session.token` are configured on the server:
+Recommended when `session.addr` (or legacy `session.bind`) and `session.token` are configured:
 
 ```bash
 ./flowlayer-client-tui -config /path/to/flowlayer.jsonc
