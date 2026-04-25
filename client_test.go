@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/FlowLayer/client/wsclient"
+	"github.com/FlowLayer/tui/internal/wsclient"
 )
 
 func TestValidateAddress(t *testing.T) {

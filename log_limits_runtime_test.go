@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/FlowLayer/client/wsclient"
+	"github.com/FlowLayer/tui/internal/wsclient"
 )
 
 func TestModelFetchRequestTargetForSelectionOmitsLimitByDefault(t *testing.T) {
