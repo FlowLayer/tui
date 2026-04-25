@@ -1,5 +1,6 @@
-// Vendored from FlowLayer server protocol v1 for the embedded TUI client.
-// Keep in sync manually when the server protocol evolves.
+// Embedded WebSocket client used by the FlowLayer TUI.
+// Originally based on the FlowLayer server client implementation.
+// Maintained independently in this repository.
 package wsclient
 
 import (
