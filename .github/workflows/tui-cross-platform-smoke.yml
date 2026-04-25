@@ -1,0 +1,93 @@
+name: TUI cross-platform smoke
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  smoke:
+    name: ${{ matrix.runner }} / ${{ matrix.goos }} / ${{ matrix.goarch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            ext: ""
+          - runner: ubuntu-24.04-arm
+            goos: linux
+            goarch: arm64
+            ext: ""
+          - runner: macos-15-intel
+            goos: darwin
+            goarch: amd64
+            ext: ""
+          - runner: macos-latest
+            goos: darwin
+            goarch: arm64
+            ext: ""
+          - runner: windows-latest
+            goos: windows
+            goarch: amd64
+            ext: ".exe"
+          - runner: windows-11-arm
+            goos: windows
+            goarch: arm64
+            ext: ".exe"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build binary (non-Windows)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p dist
+          go build -o "dist/flowlayer-client-tui${{ matrix.ext }}" .
+
+      - name: Build binary (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          go build -o "dist/flowlayer-client-tui${{ matrix.ext }}" .
+
+      - name: Smoke --version (non-Windows)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: ./dist/flowlayer-client-tui${{ matrix.ext }} --version
+
+      - name: Smoke --version (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\dist\flowlayer-client-tui${{ matrix.ext }} --version
+
+      - name: Smoke --help (non-Windows)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: ./dist/flowlayer-client-tui${{ matrix.ext }} --help
+
+      - name: Smoke --help (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\dist\flowlayer-client-tui${{ matrix.ext }} --help
