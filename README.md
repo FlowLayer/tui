@@ -107,6 +107,23 @@ Command results are used for user feedback, not for inventing service state.
 
 ---
 
+## Internals / embedded WebSocket client
+
+This repository embeds an internal copy of the WebSocket client and protocol types used by the server v1 protocol contract.
+
+- Internal paths: `internal/wsclient` and `internal/protocol`
+- Scope: internal embedded client for this TUI only
+- Non-goal: this is not a public SDK
+
+This makes the TUI repository autonomous and releasable independently, without requiring a sibling server checkout.
+
+When the server protocol evolves, resynchronize both internal directories manually:
+
+- `internal/wsclient`
+- `internal/protocol`
+
+---
+
 ## Architecture
 
 Connection and message flow:

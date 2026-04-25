@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/FlowLayer/client/wsclient"
+	"github.com/FlowLayer/tui/internal/wsclient"
 )
 
 type ConnectionStatus string

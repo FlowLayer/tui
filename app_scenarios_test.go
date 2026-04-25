@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/FlowLayer/client/wsclient"
+	"github.com/FlowLayer/tui/internal/wsclient"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
