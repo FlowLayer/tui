@@ -4,9 +4,11 @@ Terminal client for observing and operating a running [FlowLayer](https://flowla
 
 - **Website**: [flowlayer.tech](https://flowlayer.tech/)
 - **FlowLayer server**: [github.com/FlowLayer/flowlayer](https://github.com/FlowLayer/flowlayer)
+- **Official releases (server + TUI binaries)**: [github.com/FlowLayer/flowlayer/releases](https://github.com/FlowLayer/flowlayer/releases)
+- **Distribution tooling repo (recipes/manifests)**: [github.com/FlowLayer/distribution](https://github.com/FlowLayer/distribution)
 - **Protocol spec**: [PROTOCOL.md](https://github.com/FlowLayer/flowlayer/blob/main/PROTOCOL.md)
 
-A running FlowLayer server is required. This repository is the external client binary.
+A running FlowLayer server is required. This repository contains the TUI source code.
 
 The TUI connects over WebSocket and provides a deterministic local view (snapshot + live events + replay) of distributed service interactions during development.
 
@@ -19,7 +21,11 @@ Connection modes:
 
 ## Installation
 
-Download the prebuilt binary from [GitHub Releases](https://github.com/FlowLayer/tui/releases).
+Official binaries are published with the global FlowLayer releases: [github.com/FlowLayer/flowlayer/releases](https://github.com/FlowLayer/flowlayer/releases).
+
+For user-facing installation methods, see https://github.com/FlowLayer/flowlayer and https://flowlayer.tech.
+
+Download `flowlayer-client-tui` from that release and run:
 
 Run the TUI:
 
@@ -39,6 +45,8 @@ Recommended when `session.addr` and `session.token` are configured:
 ./flowlayer-client-tui -config /path/to/flowlayer.jsonc
 ```
 
+For distribution recipe internals (`install.sh`, Homebrew, Scoop, Chocolatey source, Winget manifests), see https://github.com/FlowLayer/distribution.
+
 ## CLI
 
 - Bare invocation launches the TUI.
@@ -47,7 +55,7 @@ Recommended when `session.addr` and `session.token` are configured:
 - `-v` is not supported.
 - Unknown flags or positional arguments print `Error: <message>`, then the full help, and exit 2.
 - `NO_COLOR` disables red error coloring.
-- Official page: https://flowlayer.tech/tui/
+- User documentation: https://flowlayer.tech
 
 ---
 
@@ -115,7 +123,7 @@ This repository embeds an internal copy of the WebSocket client and protocol typ
 - Scope: internal embedded client for this TUI only
 - Non-goal: this is not a public SDK
 
-This makes the TUI repository autonomous and releasable independently, without requiring a sibling server checkout.
+This keeps the TUI repository autonomous for development and testing, without requiring a sibling server checkout.
 
 When the server protocol evolves, resynchronize both internal directories manually:
 
