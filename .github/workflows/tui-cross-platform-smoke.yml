@@ -59,7 +59,7 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: |
           mkdir -p dist
-          go build -o "dist/flowlayer-client-tui${{ matrix.ext }}" .
+          go build -o "dist/flowlayer-client-tui${{ matrix.ext }}" ./cmd/flowlayer-client-tui
 
       - name: Build binary (Windows)
         if: runner.os == 'Windows'
@@ -70,7 +70,7 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          go build -o "dist/flowlayer-client-tui${{ matrix.ext }}" .
+          go build -o "dist/flowlayer-client-tui${{ matrix.ext }}" ./cmd/flowlayer-client-tui
 
       - name: Smoke --version (non-Windows)
         if: runner.os != 'Windows'
