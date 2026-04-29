@@ -3,7 +3,7 @@ set -euo pipefail
 
 APP_NAME="flowlayer-client-tui"
 VERSION="1.0.0"
-MAIN_PKG="./"
+MAIN_PKG="./cmd/flowlayer-client-tui"
 DIST_DIR="dist"
 
 TARGETS=(

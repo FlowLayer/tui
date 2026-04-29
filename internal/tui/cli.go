@@ -1,4 +1,4 @@
-package main
+package tui
 
 import (
 	"flag"
@@ -23,7 +23,9 @@ var version = "1.0.0"
 
 type tuiLauncher func(runtimeOptions) error
 
-func main() {
+// Main is the entry point for the flowlayer-client-tui binary. It is invoked
+// from cmd/flowlayer-client-tui/main.go.
+func Main() {
 	exitCode := runCLI(os.Args[1:], os.Stdout, os.Stderr, launchTUI)
 	if exitCode != 0 {
 		os.Exit(exitCode)

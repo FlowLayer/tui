@@ -142,18 +142,25 @@ There is no HTTP/SSE control path. There never will be — the WebSocket is the 
 Run from source:
 
 ```bash
-go run . -config /path/to/flowlayer.jsonc
-go run . -addr 127.0.0.1:6999 -token <bearer-token>
+go run ./cmd/flowlayer-client-tui -config /path/to/flowlayer.jsonc
+go run ./cmd/flowlayer-client-tui -addr 127.0.0.1:6999 -token <bearer-token>
+```
+
+Build a local binary:
+
+```bash
+go build -o flowlayer-client-tui ./cmd/flowlayer-client-tui
 ```
 
 The repository embeds an internal copy of the WebSocket client and protocol types from the server's V1 contract:
 
-- `internal/wsclient`
-- `internal/protocol`
+- `internal/tui` — TUI implementation (Bubble Tea model, CLI, theme, config loader, log formatting)
+- `internal/wsclient` — embedded WebSocket client
+- `internal/protocol` — embedded V1 envelope/types
 
-This keeps the TUI repo autonomous — no sibling-server checkout required to build, run, or test. It is **not** a public SDK; resynchronize both directories manually when the server protocol evolves.
+This keeps the TUI repo autonomous — no sibling-server checkout required to build, run, or test. It is **not** a public SDK; resynchronize the embedded directories manually when the server protocol evolves.
 
-Tests are colocated with the code (`*_test.go`). The codebase is intentionally small and readable — start with [`app.go`](app.go), [`client.go`](client.go), and [`config.go`](config.go).
+Tests are colocated with the code (`*_test.go`) under `internal/tui/`. The codebase is intentionally small and readable — start with [`internal/tui/app.go`](internal/tui/app.go), [`internal/tui/client.go`](internal/tui/client.go), and [`internal/tui/config.go`](internal/tui/config.go).
 
 ---
 
