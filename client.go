@@ -317,15 +317,22 @@ func sendGlobalAction(ctx context.Context, client *wsclient.Client, action Servi
 }
 
 func fetchLogs(ctx context.Context, client *wsclient.Client, serviceName string) ServiceLogsFetchResult {
-	return fetchLogsRequest(ctx, client, serviceName, 0)
+	return fetchLogsRequest(ctx, client, serviceName, 0, 0, 0)
 }
 
 func fetchLogsAfter(ctx context.Context, client *wsclient.Client, serviceName string, afterSeq int64) ServiceLogsFetchResult {
-	return fetchLogsRequest(ctx, client, serviceName, afterSeq)
+	return fetchLogsRequest(ctx, client, serviceName, afterSeq, 0, 0)
 }
 
-func fetchLogsRequest(ctx context.Context, client *wsclient.Client, serviceName string, afterSeq int64) ServiceLogsFetchResult {
-	commandPayload := buildGetLogsPayload(serviceName, afterSeq)
+// fetchLogsBefore requests entries with seq strictly less than beforeSeq,
+// capped at limit (0 = let the server decide). Used by the log-view UI to
+// load older history when the user scrolls past the top of the buffer.
+func fetchLogsBefore(ctx context.Context, client *wsclient.Client, serviceName string, beforeSeq int64, limit int) ServiceLogsFetchResult {
+	return fetchLogsRequest(ctx, client, serviceName, 0, beforeSeq, limit)
+}
+
+func fetchLogsRequest(ctx context.Context, client *wsclient.Client, serviceName string, afterSeq int64, beforeSeq int64, limit int) ServiceLogsFetchResult {
+	commandPayload := buildGetLogsPayload(serviceName, afterSeq, beforeSeq, limit)
 
 	runCtx := ctx
 	if runCtx == nil {
@@ -368,7 +375,7 @@ func fetchLogsRequest(ctx context.Context, client *wsclient.Client, serviceName 
 	return decoded
 }
 
-func buildGetLogsPayload(serviceName string, afterSeq int64) any {
+func buildGetLogsPayload(serviceName string, afterSeq int64, beforeSeq int64, limit int) any {
 	payload := map[string]any{}
 	trimmedService := strings.TrimSpace(serviceName)
 	if trimmedService != "" {
@@ -376,6 +383,12 @@ func buildGetLogsPayload(serviceName string, afterSeq int64) any {
 	}
 	if afterSeq > 0 {
 		payload["after_seq"] = afterSeq
+	}
+	if beforeSeq > 0 {
+		payload["before_seq"] = beforeSeq
+	}
+	if limit > 0 {
+		payload["limit"] = limit
 	}
 
 	commandPayload := any(nil)

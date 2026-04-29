@@ -168,6 +168,8 @@ Navigation:
 - `up` / `down`: move service selection (left panel) or scroll logs (right panel)
 - `pgup` / `pgdown`: scroll logs by page
 
+When scrolling up reaches the top of the log buffer, the TUI automatically requests older entries via `get_logs` with `before_seq`. If the server is configured with `logs.dir`, history older than the in-memory ring buffer is fetched transparently from the on-disk JSONL projection.
+
 Actions:
 
 - `s`: start or restart selected service (depends on current service status)

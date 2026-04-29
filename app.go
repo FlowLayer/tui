@@ -61,6 +61,12 @@ type replayLogsLoadedMsg struct {
 	result ServiceLogsFetchResult
 }
 
+type olderLogsLoadedMsg struct {
+	serviceName string
+	beforeSeq   int64
+	result      ServiceLogsFetchResult
+}
+
 type serviceActionDoneMsg struct {
 	action      ServiceAction
 	result      ServiceActionResult
@@ -256,6 +262,8 @@ type model struct {
 	seenLogSeqs          map[int64]struct{}
 	replayPending        bool
 	logsTruncated        bool
+	loadingOlderLogs     bool
+	noOlderLogsAvailable bool
 	effectiveLogLimit    *int
 	headerHelp           help.Model
 	headerKeys           headerKeyMap
@@ -371,6 +379,28 @@ func (model model) fetchReplayLogsCmd(afterSeq int64) tea.Cmd {
 
 		result := fetchLogsAfter(context.Background(), client, serviceName, cursor)
 		return replayLogsLoadedMsg{result: result}
+	}
+}
+
+// fetchOlderLogsCmd issues a backward-pagination request via before_seq.
+// `serviceName` is the selected list entry (may be the synthetic "all logs"
+// label) and `targetService` is the actual wire-protocol service filter.
+// The request is bounded by the current effective limit so the server
+// returns a usable page rather than the full configured maximum.
+func (model model) fetchOlderLogsCmd(serviceName string, beforeSeq int64) tea.Cmd {
+	client := model.client
+	targetService := model.fetchRequestTargetForSelection(serviceName)
+	pageLimit := 0
+	if model.effectiveLogLimit != nil && *model.effectiveLogLimit > 0 {
+		pageLimit = *model.effectiveLogLimit
+	}
+
+	return func() tea.Msg {
+		if client == nil {
+			return olderLogsLoadedMsg{serviceName: serviceName, beforeSeq: beforeSeq, result: ServiceLogsFetchResult{Status: ServiceLogsFetchError}}
+		}
+		result := fetchLogsBefore(context.Background(), client, targetService, beforeSeq, pageLimit)
+		return olderLogsLoadedMsg{serviceName: serviceName, beforeSeq: beforeSeq, result: result}
 	}
 }
 
@@ -523,6 +553,60 @@ func (model model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if appended || len(model.logEntries) != beforeTrimCount {
 			model.setLogsViewportContent()
 		}
+	case olderLogsLoadedMsg:
+		// Backward pagination: clear the in-flight flag, then merge older
+		// entries into logEntries while preserving the user's scroll position
+		// in the viewport. We do not flip `loadingOlderLogs` until we are
+		// sure the response targets the currently-selected service so a
+		// late-arriving response for a previous selection does not unblock
+		// the new one.
+		if message.serviceName != model.selectedServiceName() {
+			break
+		}
+		model.loadingOlderLogs = false
+		if message.result.Status != ServiceLogsFetchOK {
+			// Best-effort: a failure here just means the user can retry by
+			// scrolling up again. Keep the existing buffer as-is.
+			break
+		}
+
+		olderLogs := dedupeLogsBySeq(message.result.Logs)
+		// Drop entries we have already (defence against overlap / duplicate
+		// frames). After dedupe, anything left is strictly older than what
+		// we currently hold.
+		newOlder := make([]ServiceLog, 0, len(olderLogs))
+		for _, entry := range olderLogs {
+			if _, seen := model.seenLogSeqs[entry.Seq]; seen {
+				continue
+			}
+			newOlder = append(newOlder, entry)
+		}
+
+		if len(newOlder) == 0 {
+			// Server has nothing older than what we already have — stop
+			// firing requests for this selection.
+			model.noOlderLogsAvailable = true
+			break
+		}
+
+		// Capture the line count before we mutate the viewport content so we
+		// can offset the viewport's YOffset by exactly the number of lines
+		// that were prepended, keeping the user's anchor visible.
+		previousLineCount := model.logsViewport.TotalLineCount()
+		previousYOffset := model.logsViewport.YOffset
+
+		merged := append([]ServiceLog{}, newOlder...)
+		merged = append(merged, model.logEntries...)
+		model.logEntries = merged
+		model.rebuildSeenLogSeqs()
+		model.setLogsViewportContent()
+
+		newLineCount := model.logsViewport.TotalLineCount()
+		delta := newLineCount - previousLineCount
+		if delta > 0 {
+			model.logsFollow = false
+			model.logsViewport.SetYOffset(previousYOffset + delta)
+		}
 	case serviceActionDoneMsg:
 		model.updateRestartingStateForActionResult(message.action, message.serviceName, message.result)
 		model.updateBusyStateForActionResult(message.serviceName, message.result)
@@ -651,6 +735,8 @@ func (model model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	var selectionLogsCmd tea.Cmd
 	if selectedAfter != selectedBefore {
 		model.setEffectiveLogLimit(nil)
+		model.loadingOlderLogs = false
+		model.noOlderLogsAvailable = false
 		if selectedAfter == "" {
 			model.logEntries = nil
 			model.logsTruncated = false
@@ -667,6 +753,7 @@ func (model model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 
 	model.setLogsViewportKeyHandling(model.focus == focusRight && !model.logsFilterEdit && !model.showConnectionInfo)
 	var viewportCmd tea.Cmd
+	var olderLogsCmd tea.Cmd
 	if !skipViewportUpdate {
 		updatedViewport, command := model.logsViewport.Update(message)
 		model.logsViewport = updatedViewport
@@ -678,6 +765,18 @@ func (model model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				case "down":
 					if model.logsViewport.AtBottom() {
 						model.logsFollow = true
+					}
+				case "up", "pgup", "k":
+					// Backward pagination: when the user scrolls past the
+					// top of the buffer, fetch older entries via
+					// before_seq. The viewport already absorbs the key
+					// (above) so this only fires when AtTop reports true
+					// _after_ the scroll attempt — i.e. there is no more
+					// content above. We rely on the loadingOlderLogs flag
+					// to coalesce repeated key-presses into one in-flight
+					// request.
+					if olderCmd, triggered := model.maybeRequestOlderLogs(); triggered {
+						olderLogsCmd = olderCmd
 					}
 				}
 			}
@@ -701,7 +800,7 @@ func (model model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return model, tea.Quit
 	}
 
-	return model, batchCmds(viewportCmd, messageCmd, selectionLogsCmd)
+	return model, batchCmds(viewportCmd, messageCmd, selectionLogsCmd, olderLogsCmd)
 }
 
 func (model model) View() string {
@@ -1619,6 +1718,55 @@ func (model *model) updateLastSeqFromLogs(logs []ServiceLog) {
 	for _, entry := range logs {
 		model.updateLastSeq(entry.Seq)
 	}
+}
+
+// maybeRequestOlderLogs decides whether to issue a backward-pagination
+// request for the currently selected service. Returns the command to run
+// (nil if nothing should be done) and a flag indicating whether a request
+// was scheduled. The caller is expected to have just observed a scroll-up
+// key event in the right pane.
+//
+// We only fire the request when the viewport is parked at the top of its
+// content (so the user has nothing more to scroll into), no request is in
+// flight, and we have not already learned that the server has nothing
+// older. The lowest seq in the current buffer becomes the `before_seq`
+// cursor.
+func (model *model) maybeRequestOlderLogs() (tea.Cmd, bool) {
+	if model.loadingOlderLogs || model.noOlderLogsAvailable {
+		return nil, false
+	}
+	if !model.logsViewport.AtTop() {
+		return nil, false
+	}
+	if len(model.logEntries) == 0 {
+		return nil, false
+	}
+	selected := model.selectedServiceName()
+	if selected == "" {
+		return nil, false
+	}
+
+	beforeSeq := lowestSeq(model.logEntries)
+	if beforeSeq <= 0 {
+		return nil, false
+	}
+
+	model.loadingOlderLogs = true
+	cmd := model.fetchOlderLogsCmd(selected, beforeSeq)
+	return cmd, true
+}
+
+func lowestSeq(entries []ServiceLog) int64 {
+	var lowest int64
+	for _, entry := range entries {
+		if entry.Seq <= 0 {
+			continue
+		}
+		if lowest == 0 || entry.Seq < lowest {
+			lowest = entry.Seq
+		}
+	}
+	return lowest
 }
 
 func (model *model) appendLogEntryIfVisible(logEntry ServiceLog) bool {
