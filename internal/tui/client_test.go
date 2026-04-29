@@ -130,14 +130,14 @@ func TestFetchLogsAfterWithoutClient(t *testing.T) {
 }
 
 func TestBuildGetLogsPayloadEmptyIsNil(t *testing.T) {
-	payload := buildGetLogsPayload("", 0)
+	payload := buildGetLogsPayload("", 0, 0, 0)
 	if payload != nil {
 		t.Fatalf("payload = %#v, want nil", payload)
 	}
 }
 
 func TestBuildGetLogsPayloadIncludesServiceWithoutImplicitLimit(t *testing.T) {
-	payload := buildGetLogsPayload(" billing ", 0)
+	payload := buildGetLogsPayload(" billing ", 0, 0, 0)
 	decoded, ok := payload.(map[string]any)
 	if !ok {
 		t.Fatalf("payload type = %T, want map[string]any", payload)
@@ -152,7 +152,7 @@ func TestBuildGetLogsPayloadIncludesServiceWithoutImplicitLimit(t *testing.T) {
 }
 
 func TestBuildGetLogsPayloadIncludesAfterSeq(t *testing.T) {
-	payload := buildGetLogsPayload("billing", 42)
+	payload := buildGetLogsPayload("billing", 42, 0, 0)
 	decoded, ok := payload.(map[string]any)
 	if !ok {
 		t.Fatalf("payload type = %T, want map[string]any", payload)
@@ -166,6 +166,31 @@ func TestBuildGetLogsPayloadIncludesAfterSeq(t *testing.T) {
 	}
 	if _, hasLimit := decoded["limit"]; hasLimit {
 		t.Fatal("did not expect payload.limit for standard TUI requests")
+	}
+}
+
+func TestBuildGetLogsPayloadIncludesBeforeSeqAndLimit(t *testing.T) {
+	payload := buildGetLogsPayload("billing", 0, 99, 200)
+	decoded, ok := payload.(map[string]any)
+	if !ok {
+		t.Fatalf("payload type = %T, want map[string]any", payload)
+	}
+
+	if decoded["before_seq"] != int64(99) {
+		t.Fatalf("payload.before_seq = %#v, want %d", decoded["before_seq"], 99)
+	}
+	if decoded["limit"] != 200 {
+		t.Fatalf("payload.limit = %#v, want %d", decoded["limit"], 200)
+	}
+	if _, hasAfter := decoded["after_seq"]; hasAfter {
+		t.Fatal("did not expect payload.after_seq when only before_seq was set")
+	}
+}
+
+func TestFetchLogsBeforeWithoutClient(t *testing.T) {
+	result := fetchLogsBefore(context.Background(), nil, "billing", 99, 100)
+	if result.Status != ServiceLogsFetchRequestFailed {
+		t.Fatalf("status = %q, want %q", result.Status, ServiceLogsFetchRequestFailed)
 	}
 }
 

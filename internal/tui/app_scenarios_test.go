@@ -295,3 +295,85 @@ func TestAppScenarioReplayAfterReconnectAndNoSeqDuplicate(t *testing.T) {
 		t.Fatalf("logEntries len after duplicate live = %d, want 2", len(m.logEntries))
 	}
 }
+
+func TestAppScenarioOlderLogsLoadedPrependsAndFlagsExhaustion(t *testing.T) {
+m := newModel("127.0.0.1:3000", "", nil)
+m = applyUpdate(t, m, connectDoneMsg{result: ConnectResult{Status: StatusConnected}})
+m = applyUpdate(t, m, wsEventMsg{ok: true, event: wsclient.Event{
+Name: "snapshot",
+Data: json.RawMessage(`{"services":[{"name":"billing","status":"ready"}]}`),
+}})
+
+m = applyUpdate(t, m, tea.KeyMsg{Type: tea.KeyDown})
+if m.selectedServiceName() != "billing" {
+t.Fatalf("selected service = %q, want %q", m.selectedServiceName(), "billing")
+}
+
+m = applyUpdate(t, m, serviceLogsLoadedMsg{serviceName: "billing", result: ServiceLogsFetchResult{
+Status: ServiceLogsFetchOK,
+Logs: []ServiceLog{
+{Seq: 10, Service: "billing", Stream: "stdout", Message: "tenth"},
+{Seq: 11, Service: "billing", Stream: "stdout", Message: "eleventh"},
+},
+}})
+if len(m.logEntries) != 2 {
+t.Fatalf("logEntries after initial load = %d, want 2", len(m.logEntries))
+}
+
+m.loadingOlderLogs = true
+m = applyUpdate(t, m, olderLogsLoadedMsg{serviceName: "billing", beforeSeq: 10, result: ServiceLogsFetchResult{
+Status: ServiceLogsFetchOK,
+Logs: []ServiceLog{
+{Seq: 8, Service: "billing", Stream: "stdout", Message: "eighth"},
+{Seq: 9, Service: "billing", Stream: "stdout", Message: "ninth"},
+},
+}})
+if m.loadingOlderLogs {
+t.Fatal("loadingOlderLogs should clear after response")
+}
+if len(m.logEntries) != 4 {
+t.Fatalf("logEntries after prepend = %d, want 4", len(m.logEntries))
+}
+if m.logEntries[0].Seq != 8 || m.logEntries[3].Seq != 11 {
+t.Fatalf("ordering wrong after prepend: seqs = [%d..%d]", m.logEntries[0].Seq, m.logEntries[3].Seq)
+}
+if m.logsFollow {
+t.Fatal("follow mode should disengage when prepending older history")
+}
+
+// A second response yielding only already-seen entries should mark the
+// stream as exhausted so the TUI stops re-issuing requests.
+m.loadingOlderLogs = true
+m = applyUpdate(t, m, olderLogsLoadedMsg{serviceName: "billing", beforeSeq: 8, result: ServiceLogsFetchResult{
+Status: ServiceLogsFetchOK,
+Logs:   []ServiceLog{{Seq: 9, Service: "billing", Stream: "stdout", Message: "ninth"}},
+}})
+if m.loadingOlderLogs {
+t.Fatal("loadingOlderLogs should clear even when no new entries")
+}
+if !m.noOlderLogsAvailable {
+t.Fatal("noOlderLogsAvailable should latch when the response brings nothing new")
+}
+if len(m.logEntries) != 4 {
+t.Fatalf("logEntries should be unchanged when older response is empty; got %d", len(m.logEntries))
+}
+}
+
+func TestAppScenarioOlderLogsResetOnSelectionChange(t *testing.T) {
+m := newModel("127.0.0.1:3000", "", nil)
+m = applyUpdate(t, m, connectDoneMsg{result: ConnectResult{Status: StatusConnected}})
+m = applyUpdate(t, m, wsEventMsg{ok: true, event: wsclient.Event{
+Name: "snapshot",
+Data: json.RawMessage(`{"services":[{"name":"billing","status":"ready"},{"name":"users","status":"ready"}]}`),
+}})
+
+m.noOlderLogsAvailable = true
+m.loadingOlderLogs = true
+m = applyUpdate(t, m, tea.KeyMsg{Type: tea.KeyDown})
+if m.noOlderLogsAvailable {
+t.Fatal("noOlderLogsAvailable should reset when selection changes")
+}
+if m.loadingOlderLogs {
+t.Fatal("loadingOlderLogs should reset when selection changes")
+}
+}
