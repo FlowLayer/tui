@@ -19,7 +19,7 @@ const (
 	ansiRedCode = "\x1b[31m"
 )
 
-var version = "1.0.0"
+var version = "1.1.0"
 
 type tuiLauncher func(runtimeOptions) error
 

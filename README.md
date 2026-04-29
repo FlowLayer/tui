@@ -77,7 +77,7 @@ flowlayer-client-tui -addr 127.0.0.1:6999 -token <bearer-token>
 | `-addr <host:port>` | Manual address mode |
 | `-token <bearer>` | Manual token (use with `-addr`) |
 | `-h`, `--help` | Print help and exit |
-| `--version` | `flowlayer-client-tui 1.0.0` and exit |
+| `--version` | `flowlayer-client-tui 1.1.0` and exit |
 
 Unknown flags or stray positional arguments print `Error: <message>`, the full help, and exit `2`. `NO_COLOR` disables red error coloring. `-v` is intentionally not supported.
 
