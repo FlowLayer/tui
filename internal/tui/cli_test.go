@@ -21,7 +21,7 @@ func TestRunCLIHelpLongFlag(t *testing.T) {
 	if stderr != "" {
 		t.Fatalf("expected empty stderr, got %q", stderr)
 	}
-	if !strings.Contains(stdout, "FlowLayer TUI 1.0.0") {
+	if !strings.Contains(stdout, "FlowLayer TUI 1.1.0") {
 		t.Fatalf("expected version header in help output, got %q", stdout)
 	}
 	if !strings.Contains(stdout, "-h, --help") {
@@ -50,7 +50,7 @@ func TestRunCLIVersion(t *testing.T) {
 	if stderr != "" {
 		t.Fatalf("expected empty stderr, got %q", stderr)
 	}
-	if strings.TrimSpace(stdout) != "flowlayer-client-tui 1.0.0" {
+	if strings.TrimSpace(stdout) != "flowlayer-client-tui 1.1.0" {
 		t.Fatalf("unexpected version output: %q", stdout)
 	}
 }
