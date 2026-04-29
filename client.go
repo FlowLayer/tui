@@ -64,6 +64,14 @@ const (
 	ServiceLogsFetchError          ServiceLogsFetchStatus = "error"
 )
 
+// getLogsTimeout bounds the time allowed for a get_logs round-trip. It is
+// deliberately larger than the generic command timeout: on busy stacks (many
+// services with high log volume) the server has to assemble and sort all
+// in-memory entries under a global lock, which can take several seconds. A
+// short timeout here causes the TUI to surface a transient error and lose the
+// historical view, even though logs eventually arrive.
+const getLogsTimeout = 30 * time.Second
+
 type ServiceLogsFetchResult struct {
 	Status         ServiceLogsFetchStatus
 	Logs           []ServiceLog
@@ -319,7 +327,17 @@ func fetchLogsAfter(ctx context.Context, client *wsclient.Client, serviceName st
 func fetchLogsRequest(ctx context.Context, client *wsclient.Client, serviceName string, afterSeq int64) ServiceLogsFetchResult {
 	commandPayload := buildGetLogsPayload(serviceName, afterSeq)
 
-	result, ok := runCommand(ctx, client, "get_logs", commandPayload)
+	runCtx := ctx
+	if runCtx == nil {
+		runCtx = context.Background()
+	}
+	if _, hasDeadline := runCtx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		runCtx, cancel = context.WithTimeout(runCtx, getLogsTimeout)
+		defer cancel()
+	}
+
+	result, ok := runCommand(runCtx, client, "get_logs", commandPayload)
 	if !ok {
 		return ServiceLogsFetchResult{Status: ServiceLogsFetchRequestFailed}
 	}

@@ -483,11 +483,23 @@ func (model model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				model.setLogsViewportContent()
 			}
 		} else if message.serviceName == model.selectedServiceName() {
-			model.logEntries = nil
-			model.logsTruncated = false
-			model.setEffectiveLogLimit(nil)
-			model.resetSeenLogSeqs()
-			model.setLogsViewportContent()
+			// Distinguish deterministic protocol errors (the historical data is
+			// genuinely gone or the request was malformed) from transient
+			// failures (timeouts, network blips). For the latter, keep whatever
+			// we already have visible and let live events keep flowing — wiping
+			// the view on every transient hiccup is what made "all logs"
+			// appear empty under load.
+			switch message.result.Status {
+			case ServiceLogsFetchBadRequest, ServiceLogsFetchUnknownService:
+				model.logEntries = nil
+				model.logsTruncated = false
+				model.setEffectiveLogLimit(nil)
+				model.resetSeenLogSeqs()
+				model.setLogsViewportContent()
+			default:
+				// Transient: keep current entries, surface a hint.
+				messageCmd = batchCmds(messageCmd, model.setTransientFooter("logs fetch failed (transient) — live updates continue"))
+			}
 		}
 	case replayLogsLoadedMsg:
 		if message.result.Status != ServiceLogsFetchOK {
