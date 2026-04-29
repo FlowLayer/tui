@@ -1,186 +1,172 @@
 # FlowLayer TUI
 
-Terminal client for observing and operating a running [FlowLayer](https://flowlayer.tech/) server.
+**A keyboard-first terminal client for FlowLayer. Snapshot, live events, replay — your local distributed system, finally legible.**
 
-- **Website**: [flowlayer.tech](https://flowlayer.tech/)
-- **FlowLayer server**: [github.com/FlowLayer/flowlayer](https://github.com/FlowLayer/flowlayer)
-- **Protocol spec**: [PROTOCOL.md](https://github.com/FlowLayer/flowlayer/blob/main/PROTOCOL.md)
+[![Website](https://img.shields.io/badge/site-flowlayer.tech-4d8eff?style=flat-square)](https://flowlayer.tech/)
+[![Releases](https://img.shields.io/github/v/release/FlowLayer/flowlayer?style=flat-square&color=4d8eff)](https://github.com/FlowLayer/flowlayer/releases)
+[![Protocol](https://img.shields.io/badge/protocol-V1-4d8eff?style=flat-square)](https://github.com/FlowLayer/flowlayer/blob/main/PROTOCOL.md)
+[![Made with Go](https://img.shields.io/badge/built%20with-Go-4d8eff?style=flat-square)](https://go.dev)
 
-A running FlowLayer server is required. This repository is the external client binary.
-
-The TUI connects over WebSocket and provides a deterministic local view (snapshot + live events + replay) of distributed service interactions during development.
-
-Connection modes:
-
-- Manual mode: pass `-addr` and `-token` explicitly.
-- Config mode (recommended): pass `-config <path>` and let the TUI read `session.addr` (preferred) and `session.token`.
+[Website](https://flowlayer.tech/) · [Docs](https://flowlayer.tech/explore/client-tui) · [FlowLayer server](https://github.com/FlowLayer/flowlayer) · [Releases](https://github.com/FlowLayer/flowlayer/releases) · [Distribution](https://github.com/FlowLayer/distribution) · [Protocol](https://github.com/FlowLayer/flowlayer/blob/main/PROTOCOL.md)
 
 ---
 
-## Installation
+This repository is the source code of `flowlayer-client-tui`, the **official terminal client** of the [FlowLayer](https://flowlayer.tech/) runtime.
 
-Download the prebuilt binary from [GitHub Releases](https://github.com/FlowLayer/tui/releases).
+It connects to a running FlowLayer server over WebSocket, reconstructs a deterministic local view from `snapshot + live events + replay`, and gives you a calm, keyboard-driven cockpit to observe and control your services. No mouse. No drift. No lies.
 
-Run the TUI:
-
-```bash
-./flowlayer-client-tui -addr 127.0.0.1:6999
+```text
+┌──────────────────┐    /ws + Bearer    ┌──────────────────┐
+│ flowlayer-server │ ◄─────────────────► │ flowlayer-client │
+│  (truth, logs)   │   snapshot + events │   -tui  (you)    │
+└──────────────────┘                     └──────────────────┘
 ```
 
-With auth token:
-
-```bash
-./flowlayer-client-tui -addr 127.0.0.1:6999 -token <bearer-token>
-```
-
-Recommended when `session.addr` and `session.token` are configured:
-
-```bash
-./flowlayer-client-tui -config /path/to/flowlayer.jsonc
-```
-
-## CLI
-
-- Bare invocation launches the TUI.
-- `-h` / `--help`: print help and exit.
-- `--version`: print `flowlayer-client-tui 1.0.0` and exit.
-- `-v` is not supported.
-- Unknown flags or positional arguments print `Error: <message>`, then the full help, and exit 2.
-- `NO_COLOR` disables red error coloring.
-- Official page: https://flowlayer.tech/tui/
+A running FlowLayer server is required.
 
 ---
 
-## Development
+## Why a dedicated TUI
 
-Run the TUI from source (development mode):
+- **Deterministic view.** Snapshot establishes the baseline; live `service_status` and `log` events extend it. The TUI never invents state.
+- **Sub-100ms feedback.** Bare WebSocket, no polling, no SSE adapter, no proxy. You press a key, the server hears it.
+- **Read-only by default.** It is an observer first; control actions (`s`, `x`) are explicit single-keystroke decisions, not surfaces you can misclick.
+- **Config-driven.** Point it at your `flowlayer.jsonc` and it discovers `session.addr` and `session.token` for you.
+- **Tiny.** A single static binary. `NO_COLOR` honored. Terminal-native rendering, no Electron, no Node.
+
+---
+
+## Install
+
+Grab `flowlayer-client-tui` from the global FlowLayer release: <https://github.com/FlowLayer/flowlayer/releases>.
+
+Package-manager recipes (`install.sh`, Homebrew, Scoop, Chocolatey, Winget) live in the [distribution repository](https://github.com/FlowLayer/distribution).
+
+For end-user installation paths, see <https://flowlayer.tech>.
+
+---
+
+## Run it
+
+**Recommended — config-driven** (the TUI reads `session.addr` and `session.token` for you):
 
 ```bash
-go run . -addr 127.0.0.1:6999
+flowlayer-client-tui -config /path/to/flowlayer.jsonc
 ```
 
-With auth token:
+**Explicit address:**
 
 ```bash
-go run . -addr 127.0.0.1:6999 -token <bearer-token>
+flowlayer-client-tui -addr 127.0.0.1:6999
 ```
 
-Recommended config-driven mode:
+**With token:**
 
 ```bash
-go run . -config /path/to/flowlayer.jsonc
+flowlayer-client-tui -addr 127.0.0.1:6999 -token <bearer-token>
 ```
 
 ---
 
-## What This TUI Is
+## CLI surface
 
-- A thin client over the FlowLayer WebSocket protocol (`/ws`)
-- A local observability client for distributed-system development
-- A server observer for service status and logs
-- A keyboard-first operator surface for start/stop/restart actions
+| Form | Behavior |
+|---|---|
+| `flowlayer-client-tui` | Launches the TUI |
+| `-config <path>` | Read `session.addr` (preferred) and `session.token` from JSONC |
+| `-addr <host:port>` | Manual address mode |
+| `-token <bearer>` | Manual token (use with `-addr`) |
+| `-h`, `--help` | Print help and exit |
+| `--version` | `flowlayer-client-tui 1.0.0` and exit |
 
-What it is not:
-
-- Not an orchestrator
-- Not a source of truth
-- Not a long-term log storage layer
-- Not a complete historical log archive
-
-All business truth stays in the FlowLayer server.
-
----
-
-## Relationship with FlowLayer Server
-
-This repository contains only the terminal client (TUI). It is a read-only observer and command sender.
-
-The [FlowLayer server](https://github.com/FlowLayer/flowlayer) is the source of truth for service state, log storage, and lifecycle management. The TUI connects to a running server instance via the [WebSocket protocol](https://github.com/FlowLayer/flowlayer/blob/main/PROTOCOL.md) and does not embed any orchestration logic.
-
-The TUI keeps local UI state only (selection, filters, busy hints, footer messages, connection label). Service truth comes from server messages:
-
-- `snapshot` for the current full view
-- `service_status` for live state changes
-- `log` for live logs
-
-Command results are used for user feedback, not for inventing service state.
-
----
-
-## Internals / embedded WebSocket client
-
-This repository embeds an internal copy of the WebSocket client and protocol types used by the server v1 protocol contract.
-
-- Internal paths: `internal/wsclient` and `internal/protocol`
-- Scope: internal embedded client for this TUI only
-- Non-goal: this is not a public SDK
-
-This makes the TUI repository autonomous and releasable independently, without requiring a sibling server checkout.
-
-When the server protocol evolves, resynchronize both internal directories manually:
-
-- `internal/wsclient`
-- `internal/protocol`
-
----
-
-## Architecture
-
-Connection and message flow:
-
-1. TUI connects to `ws://<addr>/ws` (optional bearer token).
-2. Server sends `hello`.
-3. Server sends `snapshot`.
-4. TUI consumes live events (`service_status`, `log`).
-5. TUI sends commands over the same WebSocket (`start_service`, `stop_service`, `restart_service`, `start_all`, `stop_all`, `get_logs`).
-
-There is no HTTP/SSE control path in the current TUI.
-
----
-
-See [PROTOCOL.md](https://github.com/FlowLayer/flowlayer/blob/main/PROTOCOL.md) for log streaming, replay semantics, reconnect behavior, and the full message contract.
-
----
-
-## Observability Positioning
-
-The TUI is not only a log viewer and not only a control UI.
-
-- It is a local dev-first observability client.
-- It gives a deterministic view built from runtime snapshot + live events + replay.
-- It helps understand interactions between services in a local distributed system.
-- It does not replace a full observability stack.
+Unknown flags or stray positional arguments print `Error: <message>`, the full help, and exit `2`. `NO_COLOR` disables red error coloring. `-v` is intentionally not supported.
 
 ---
 
 ## Keybindings
 
-Global:
+**Global**
 
-- `q`: quit
-- `tab`: switch focus between services panel and logs panel
-- `/`: start filter edit on the focused panel
-- `esc`: close filter or modal
-- `i`: connection info modal (shows address, token, connection status)
+| Key | Action |
+|---|---|
+| `q` | Quit |
+| `tab` | Switch focus between services panel and logs panel |
+| `/` | Filter the focused panel |
+| `esc` | Close filter or modal |
+| `i` | Connection info modal (address, token, status) |
 
-Navigation:
+**Navigation**
 
-- `up` / `down`: move service selection (left panel) or scroll logs (right panel)
-- `pgup` / `pgdown`: scroll logs by page
+| Key | Action |
+|---|---|
+| `↑` / `↓` | Move service selection or scroll logs |
+| `pgup` / `pgdn` | Page-scroll the logs panel |
 
 When scrolling up reaches the top of the log buffer, the TUI automatically requests older entries via `get_logs` with `before_seq`. If the server is configured with `logs.dir`, history older than the in-memory ring buffer is fetched transparently from the on-disk JSONL projection.
 
-Actions:
+**Actions**
 
-- `s`: start or restart selected service (depends on current service status)
-- `x`: stop selected service
-- On `all logs` selection:
-  - `s` sends `start_all`
-  - `x` sends `stop_all`
+| Key | Action |
+|---|---|
+| `s` | Start (or restart) selected service |
+| `x` | Stop selected service |
+| `s` / `x` (on `all logs`) | `start_all` / `stop_all` |
 
 ---
 
-## Non-Goals
+## What it is, what it isn't
+
+| Is | Isn't |
+|---|---|
+| A local-dev observability cockpit | An orchestrator |
+| A WebSocket V1 client | A source of truth |
+| A keyboard-driven control surface | A long-term log archive |
+| A deterministic snapshot/event viewer | A multi-runtime aggregator |
+
+All business truth stays in the FlowLayer server. The TUI keeps **only UI-local state** — selection, filters, busy hints, footer messages, connection label.
+
+---
+
+## Architecture in five lines
+
+1. TUI dials `ws://<addr>/ws` with optional `Authorization: Bearer …`.
+2. Server emits `hello`.
+3. Server emits `snapshot` (the full baseline).
+4. TUI applies live `service_status` and `log` events on top.
+5. TUI sends commands (`start_service`, `stop_service`, `restart_service`, `start_all`, `stop_all`, `get_logs`) over the same socket.
+
+There is no HTTP/SSE control path. There never will be — the WebSocket is the contract. See [PROTOCOL.md](https://github.com/FlowLayer/flowlayer/blob/main/PROTOCOL.md) for log streaming, replay semantics, reconnect behavior, and the full message contract.
+
+---
+
+## Develop
+
+Run from source:
+
+```bash
+go run ./cmd/flowlayer-client-tui -config /path/to/flowlayer.jsonc
+go run ./cmd/flowlayer-client-tui -addr 127.0.0.1:6999 -token <bearer-token>
+```
+
+Build a local binary:
+
+```bash
+go build -o flowlayer-client-tui ./cmd/flowlayer-client-tui
+```
+
+The repository embeds an internal copy of the WebSocket client and protocol types from the server's V1 contract:
+
+- `internal/tui` — TUI implementation (Bubble Tea model, CLI, theme, config loader, log formatting)
+- `internal/wsclient` — embedded WebSocket client
+- `internal/protocol` — embedded V1 envelope/types
+
+This keeps the TUI repo autonomous — no sibling-server checkout required to build, run, or test. It is **not** a public SDK; resynchronize the embedded directories manually when the server protocol evolves.
+
+Tests are colocated with the code (`*_test.go`) under `internal/tui/`. The codebase is intentionally small and readable — start with [`internal/tui/app.go`](internal/tui/app.go), [`internal/tui/client.go`](internal/tui/client.go), and [`internal/tui/config.go`](internal/tui/config.go).
+
+---
+
+## Non-goals
 
 The TUI deliberately does not provide:
 
@@ -189,8 +175,10 @@ The TUI deliberately does not provide:
 - guaranteed durable retention inside the TUI process
 - multi-runtime coordination
 
+If you need any of those — write a custom client. The protocol is documented and stable; see [BUILDING-A-CLIENT.md](https://github.com/FlowLayer/flowlayer/blob/main/BUILDING-A-CLIENT.md).
+
 ---
 
 ## License
 
-MIT
+Distributed under the terms shipped with the corresponding release artifact at <https://github.com/FlowLayer/flowlayer/releases>.
