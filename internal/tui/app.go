@@ -25,9 +25,10 @@ const (
 	actionFooterTTL   = 2 * time.Second
 	serviceBusyMarker = "*"
 
-	localLogCacheMultiplier = 10
-	localLogCacheMinEntries = 1000
-	localLogCacheMaxEntries = 10000
+	localLogCacheMultiplier    = 10
+	localLogCacheMinEntries    = 1000
+	localLogCacheMaxEntries    = 10000
+	olderLogsPrefetchThreshold = 3
 
 	allLogsName      = "all logs"
 	footerCenterText = "flowlayer.tech • since 2026"
@@ -63,7 +64,7 @@ type serviceLogsLoadedMsg struct {
 
 type replayLogsLoadedMsg struct {
 	serviceName string
-	result ServiceLogsFetchResult
+	result      ServiceLogsFetchResult
 }
 
 type olderLogsLoadedMsg struct {
@@ -543,7 +544,7 @@ func (model model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				model.setLogsViewportContent()
 			default:
 				// Transient: keep current entries, surface a hint.
-				messageCmd = batchCmds(messageCmd, model.setTransientFooter("logs fetch failed (transient) — live updates continue"))
+				messageCmd = batchCmds(messageCmd, model.setTransientFooter("initial logs fetch failed - live updates continue"))
 			}
 		}
 	case replayLogsLoadedMsg:
@@ -589,6 +590,7 @@ func (model model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if message.result.Status != ServiceLogsFetchOK {
 			// Best-effort: a failure here just means the user can retry by
 			// scrolling up again. Keep the existing buffer as-is.
+			messageCmd = batchCmds(messageCmd, model.setTransientFooter("older logs fetch failed"))
 			break
 		}
 
@@ -608,6 +610,7 @@ func (model model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			// Server has nothing older than what we already have — stop
 			// firing requests for this selection.
 			model.noOlderLogsAvailable = true
+			messageCmd = batchCmds(messageCmd, model.setTransientFooter("no older logs available"))
 			break
 		}
 
@@ -748,8 +751,10 @@ func (model model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			switch message.String() {
 			case "/":
 				model.logsFilterEdit = true
-			case "up":
-				model.logsFollow = false
+			default:
+				if isLogsScrollUpKey(message.String()) {
+					model.logsFollow = false
+				}
 			}
 		}
 	}
@@ -787,17 +792,21 @@ func (model model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 					if model.logsViewport.AtBottom() {
 						model.logsFollow = true
 					}
-				case "up", "pgup", "k":
+				default:
+					if !isLogsScrollUpKey(keyMessage.String()) {
+						break
+					}
 					// Backward pagination: when the user scrolls past the
-					// top of the buffer, fetch older entries via
+					// top/near-top of the buffer, fetch older entries via
 					// before_seq. The viewport already absorbs the key
-					// (above) so this only fires when AtTop reports true
-					// _after_ the scroll attempt — i.e. there is no more
-					// content above. We rely on the loadingOlderLogs flag
-					// to coalesce repeated key-presses into one in-flight
+					// (above), and we rely on the loadingOlderLogs flag to
+					// coalesce repeated key-presses into one in-flight
 					// request.
 					if olderCmd, triggered := model.maybeRequestOlderLogs(); triggered {
 						olderLogsCmd = olderCmd
+						if beforeSeq := lowestSeq(model.logEntries); beforeSeq > 0 {
+							messageCmd = batchCmds(messageCmd, model.setTransientFooter(fmt.Sprintf("loading older logs before seq %d", beforeSeq)))
+						}
 					}
 				}
 			}
@@ -1814,16 +1823,15 @@ func (model *model) updateLastSeqFromLogs(logs []ServiceLog) {
 // was scheduled. The caller is expected to have just observed a scroll-up
 // key event in the right pane.
 //
-// We only fire the request when the viewport is parked at the top of its
-// content (so the user has nothing more to scroll into), no request is in
-// flight, and we have not already learned that the server has nothing
-// older. The lowest seq in the current buffer becomes the `before_seq`
-// cursor.
+// We only fire the request when the viewport is at/near the top of its
+// content (so the user is actively scrolling into history), no request is in
+// flight, and we have not already learned that the server has nothing older.
+// The lowest seq in the current buffer becomes the `before_seq` cursor.
 func (model *model) maybeRequestOlderLogs() (tea.Cmd, bool) {
 	if model.loadingOlderLogs || model.noOlderLogsAvailable {
 		return nil, false
 	}
-	if !model.logsViewport.AtTop() {
+	if !model.isLogsViewportNearTop() {
 		return nil, false
 	}
 	if len(model.logEntries) == 0 {
@@ -1842,6 +1850,22 @@ func (model *model) maybeRequestOlderLogs() (tea.Cmd, bool) {
 	model.loadingOlderLogs = true
 	cmd := model.fetchOlderLogsCmd(selected, beforeSeq)
 	return cmd, true
+}
+
+func isLogsScrollUpKey(keyName string) bool {
+	switch strings.ToLower(strings.TrimSpace(keyName)) {
+	case "up", "pgup", "k", "b", "u", "ctrl+u":
+		return true
+	default:
+		return false
+	}
+}
+
+func (model *model) isLogsViewportNearTop() bool {
+	if model.logsViewport.AtTop() {
+		return true
+	}
+	return model.logsViewport.YOffset <= olderLogsPrefetchThreshold
 }
 
 func lowestSeq(entries []ServiceLog) int64 {
