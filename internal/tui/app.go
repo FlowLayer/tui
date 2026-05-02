@@ -25,6 +25,10 @@ const (
 	actionFooterTTL   = 2 * time.Second
 	serviceBusyMarker = "*"
 
+	localLogCacheMultiplier = 10
+	localLogCacheMinEntries = 1000
+	localLogCacheMaxEntries = 10000
+
 	allLogsName      = "all logs"
 	footerCenterText = "flowlayer.tech • since 2026"
 )
@@ -506,12 +510,22 @@ func (model model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			loadedLogs := dedupeLogsBySeq(message.result.Logs)
 			model.updateLastSeqFromLogs(loadedLogs)
 			if message.serviceName == model.selectedServiceName() {
+				loadedCount := len(loadedLogs)
 				model.setEffectiveLogLimit(message.result.EffectiveLimit)
 				liveLogs := filterVisibleLogsAfterSeq(model.logEntries, message.serviceName, message.requestSeq)
 				model.logEntries = mergeLoadedAndLiveLogsWithinLimit(loadedLogs, liveLogs, model.effectiveLogLimit)
 				model.logsTruncated = message.result.Truncated
 				model.rebuildSeenLogSeqs()
+				if loadedCount > 0 {
+					// Keep freshly loaded history visible instead of immediately
+					// snapping back to the live tail.
+					model.logsFollow = false
+				}
 				model.setLogsViewportContent()
+				if loadedCount > 0 {
+					model.logsViewport.SetYOffset(0)
+					messageCmd = batchCmds(messageCmd, model.setTransientFooter(fmt.Sprintf("loaded %d historical entries", loadedCount)))
+				}
 			}
 		} else if message.serviceName == model.selectedServiceName() {
 			// Distinguish deterministic protocol errors (the historical data is
@@ -615,6 +629,7 @@ func (model model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			model.logsFollow = false
 			model.logsViewport.SetYOffset(previousYOffset + delta)
 		}
+		messageCmd = batchCmds(messageCmd, model.setTransientFooter(fmt.Sprintf("loaded %d older entries", len(newOlder))))
 	case serviceActionDoneMsg:
 		model.updateRestartingStateForActionResult(message.action, message.serviceName, message.result)
 		model.updateBusyStateForActionResult(message.serviceName, message.result)
@@ -1873,12 +1888,29 @@ func (model *model) setEffectiveLogLimit(limit *int) {
 	model.effectiveLogLimit = copied
 }
 
-func (model *model) enforceVisibleLogBufferLimit() {
-	maxEntries := 0
-	if model.effectiveLogLimit != nil {
-		maxEntries = *model.effectiveLogLimit
+func computeLocalLogCacheLimit(effectiveLimit *int) int {
+	localLimit := localLogCacheMinEntries
+	if effectiveLimit != nil && *effectiveLimit > 0 {
+		if *effectiveLimit > localLogCacheMaxEntries/localLogCacheMultiplier {
+			localLimit = localLogCacheMaxEntries
+		} else {
+			localLimit = *effectiveLimit * localLogCacheMultiplier
+		}
 	}
-	if maxEntries <= 0 || len(model.logEntries) <= maxEntries {
+
+	if localLimit < localLogCacheMinEntries {
+		localLimit = localLogCacheMinEntries
+	}
+	if localLimit > localLogCacheMaxEntries {
+		localLimit = localLogCacheMaxEntries
+	}
+
+	return localLimit
+}
+
+func (model *model) enforceVisibleLogBufferLimit() {
+	maxEntries := computeLocalLogCacheLimit(model.effectiveLogLimit)
+	if len(model.logEntries) <= maxEntries {
 		return
 	}
 

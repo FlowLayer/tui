@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -334,6 +335,10 @@ func TestAppScenarioStaleServiceLogsResponseIgnoredAfterSelectionChange(t *testi
 	if len(m.logEntries) != 1 {
 		t.Fatalf("baseline logEntries len = %d, want 1", len(m.logEntries))
 	}
+	m.logsFollow = true
+	m.setPersistentFooter("connected")
+	footerBefore := m.footerMessage
+	footerTransientBefore := m.footerTransient
 
 	m = applyUpdate(t, m, serviceLogsLoadedMsg{serviceName: "billing", requestSeq: 10, result: ServiceLogsFetchResult{
 		Status:    ServiceLogsFetchOK,
@@ -351,6 +356,18 @@ func TestAppScenarioStaleServiceLogsResponseIgnoredAfterSelectionChange(t *testi
 	}
 	if m.logsTruncated {
 		t.Fatal("logsTruncated should not be updated by stale service response")
+	}
+	if !m.logsFollow {
+		t.Fatal("stale service response should not disable follow mode")
+	}
+	if m.footerMessage != footerBefore {
+		t.Fatalf("footer message after stale response = %q, want %q", m.footerMessage, footerBefore)
+	}
+	if m.footerTransient != footerTransientBefore {
+		t.Fatalf("footer transient after stale response = %v, want %v", m.footerTransient, footerTransientBefore)
+	}
+	if strings.Contains(strings.ToLower(m.footerMessage), "loaded") {
+		t.Fatalf("stale service response should not set loaded footer, got %q", m.footerMessage)
 	}
 }
 
@@ -438,6 +455,15 @@ func TestAppScenarioServiceLogsLoadedKeepsLiveLogsAfterRequestStart(t *testing.T
 	}
 	if m.logEntries[2].Seq != 31 {
 		t.Fatalf("third seq = %d, want 31", m.logEntries[2].Seq)
+	}
+	if m.logsFollow {
+		t.Fatal("expected follow mode disabled after historical load")
+	}
+	if m.footerMessage != "loaded 2 historical entries" {
+		t.Fatalf("footer message = %q, want %q", m.footerMessage, "loaded 2 historical entries")
+	}
+	if !m.footerTransient {
+		t.Fatal("historical loaded footer should be transient")
 	}
 }
 
@@ -641,6 +667,52 @@ func TestAppScenarioSelectionChangeLiveLogsDoNotEvictHistory(t *testing.T) {
 	if !hasLive {
 		t.Fatal("expected at least one live entry after merge")
 	}
+	if m.logsFollow {
+		t.Fatal("expected follow mode disabled after non-empty historical response")
+	}
+	if m.footerMessage != "loaded 10 historical entries" {
+		t.Fatalf("footer message = %q, want %q", m.footerMessage, "loaded 10 historical entries")
+	}
+}
+
+func TestAppScenarioHistoricalLoadKeepsViewportAtTopAndShowsLoadedFooter(t *testing.T) {
+	m := newModel("127.0.0.1:3000", "", nil)
+	m = applyUpdate(t, m, connectDoneMsg{result: ConnectResult{Status: StatusConnected}})
+	m = applyUpdate(t, m, wsEventMsg{ok: true, event: wsclient.Event{
+		Name: "snapshot",
+		Data: json.RawMessage(`{"services":[{"name":"billing","status":"ready"}]}`),
+	}})
+
+	loaded := make([]ServiceLog, 0, 120)
+	for seq := int64(1); seq <= 120; seq++ {
+		loaded = append(loaded, ServiceLog{
+			Seq:     seq,
+			Service: "billing",
+			Stream:  "stdout",
+			Message: fmt.Sprintf("historical-%d", seq),
+		})
+	}
+
+	m = applyUpdate(t, m, serviceLogsLoadedMsg{serviceName: allLogsName, result: ServiceLogsFetchResult{
+		Status: ServiceLogsFetchOK,
+		Logs:   loaded,
+	}})
+
+	if m.logsFollow {
+		t.Fatal("expected follow mode disabled after non-empty historical all-logs response")
+	}
+	if m.logsViewport.YOffset != 0 {
+		t.Fatalf("viewport yOffset after historical load = %d, want 0", m.logsViewport.YOffset)
+	}
+	if m.logsViewport.AtBottom() {
+		t.Fatal("viewport should not jump to bottom right after historical load")
+	}
+	if m.footerMessage != "loaded 120 historical entries" {
+		t.Fatalf("footer message = %q, want %q", m.footerMessage, "loaded 120 historical entries")
+	}
+	if !m.footerTransient {
+		t.Fatal("expected historical loaded footer to be transient")
+	}
 }
 
 func TestAppScenarioSelectionChangeManyLiveLogsKeepsHistoricalAndLive(t *testing.T) {
@@ -704,5 +776,256 @@ func TestAppScenarioSelectionChangeManyLiveLogsKeepsHistoricalAndLive(t *testing
 	}
 	if !hasLive {
 		t.Fatal("expected at least one recent live entry when live volume exceeds limit")
+	}
+}
+
+func TestAppScenarioBackwardPaginationKeepsOlderEntriesAfterLiveAppend(t *testing.T) {
+	m := newModel("127.0.0.1:3000", "", nil)
+	m = applyUpdate(t, m, connectDoneMsg{result: ConnectResult{Status: StatusConnected}})
+	m = applyUpdate(t, m, wsEventMsg{ok: true, event: wsclient.Event{
+		Name: "snapshot",
+		Data: json.RawMessage(`{"services":[{"name":"billing","status":"ready"}]}`),
+	}})
+
+	m = applyUpdate(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	if m.selectedServiceName() != "billing" {
+		t.Fatalf("selected service = %q, want %q", m.selectedServiceName(), "billing")
+	}
+
+	effectiveLimit := 200
+	tail := make([]ServiceLog, 0, 200)
+	for seq := int64(801); seq <= 1000; seq++ {
+		tail = append(tail, ServiceLog{Seq: seq, Service: "billing", Stream: "stdout", Message: fmt.Sprintf("tail-%d", seq)})
+	}
+	m = applyUpdate(t, m, serviceLogsLoadedMsg{serviceName: "billing", result: ServiceLogsFetchResult{
+		Status:         ServiceLogsFetchOK,
+		EffectiveLimit: &effectiveLimit,
+		Logs:           tail,
+	}})
+
+	olderPage := make([]ServiceLog, 0, 200)
+	for seq := int64(601); seq <= 800; seq++ {
+		olderPage = append(olderPage, ServiceLog{Seq: seq, Service: "billing", Stream: "stdout", Message: fmt.Sprintf("older-%d", seq)})
+	}
+	m = applyUpdate(t, m, olderLogsLoadedMsg{serviceName: "billing", beforeSeq: 801, result: ServiceLogsFetchResult{
+		Status: ServiceLogsFetchOK,
+		Logs:   olderPage,
+	}})
+
+	if len(m.logEntries) != 400 {
+		t.Fatalf("logEntries len after older page = %d, want 400", len(m.logEntries))
+	}
+	if m.logEntries[0].Seq != 601 || m.logEntries[len(m.logEntries)-1].Seq != 1000 {
+		t.Fatalf("seq bounds after older page = [%d ... %d], want [601 ... 1000]", m.logEntries[0].Seq, m.logEntries[len(m.logEntries)-1].Seq)
+	}
+	if m.footerMessage != "loaded 200 older entries" {
+		t.Fatalf("footer message after older page = %q, want %q", m.footerMessage, "loaded 200 older entries")
+	}
+	if !m.footerTransient {
+		t.Fatal("older loaded footer should be transient")
+	}
+
+	m = applyUpdate(t, m, wsEventMsg{ok: true, event: wsclient.Event{
+		Name: "log",
+		Data: json.RawMessage(`{"seq":1001,"service":"billing","phase":"run","stream":"stdout","message":"live-1001","timestamp":"2026-05-02T10:00:01Z"}`),
+	}})
+
+	if len(m.logEntries) != 401 {
+		t.Fatalf("logEntries len after one live append = %d, want 401", len(m.logEntries))
+	}
+	if m.logEntries[0].Seq != 601 {
+		t.Fatalf("oldest seq after one live append = %d, want 601", m.logEntries[0].Seq)
+	}
+	if lowestSeq(m.logEntries) != 601 {
+		t.Fatalf("lowest seq after one live append = %d, want 601", lowestSeq(m.logEntries))
+	}
+	foundOlder := false
+	for _, entry := range m.logEntries {
+		if entry.Seq == 650 {
+			foundOlder = true
+			break
+		}
+	}
+	if !foundOlder {
+		t.Fatal("older page entries should remain present after one live append")
+	}
+	if len(m.logEntries) > computeLocalLogCacheLimit(&effectiveLimit) {
+		t.Fatalf("logEntries len = %d, want <= local limit %d", len(m.logEntries), computeLocalLogCacheLimit(&effectiveLimit))
+	}
+}
+
+func TestAppScenarioBackwardPaginationAccumulatesMultiplePages(t *testing.T) {
+	m := newModel("127.0.0.1:3000", "", nil)
+	m = applyUpdate(t, m, connectDoneMsg{result: ConnectResult{Status: StatusConnected}})
+	m = applyUpdate(t, m, wsEventMsg{ok: true, event: wsclient.Event{
+		Name: "snapshot",
+		Data: json.RawMessage(`{"services":[{"name":"billing","status":"ready"}]}`),
+	}})
+
+	m = applyUpdate(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	if m.selectedServiceName() != "billing" {
+		t.Fatalf("selected service = %q, want %q", m.selectedServiceName(), "billing")
+	}
+
+	effectiveLimit := 200
+	tail := make([]ServiceLog, 0, 200)
+	for seq := int64(801); seq <= 1000; seq++ {
+		tail = append(tail, ServiceLog{Seq: seq, Service: "billing", Stream: "stdout", Message: fmt.Sprintf("tail-%d", seq)})
+	}
+	m = applyUpdate(t, m, serviceLogsLoadedMsg{serviceName: "billing", result: ServiceLogsFetchResult{
+		Status:         ServiceLogsFetchOK,
+		EffectiveLimit: &effectiveLimit,
+		Logs:           tail,
+	}})
+	if got := lowestSeq(m.logEntries); got != 801 {
+		t.Fatalf("lowest seq after initial tail = %d, want 801", got)
+	}
+
+	olderPageOne := make([]ServiceLog, 0, 200)
+	for seq := int64(601); seq <= 800; seq++ {
+		olderPageOne = append(olderPageOne, ServiceLog{Seq: seq, Service: "billing", Stream: "stdout", Message: fmt.Sprintf("older-1-%d", seq)})
+	}
+	m = applyUpdate(t, m, olderLogsLoadedMsg{serviceName: "billing", beforeSeq: 801, result: ServiceLogsFetchResult{
+		Status: ServiceLogsFetchOK,
+		Logs:   olderPageOne,
+	}})
+	if got := lowestSeq(m.logEntries); got != 601 {
+		t.Fatalf("lowest seq after first older page = %d, want 601", got)
+	}
+
+	olderPageTwo := make([]ServiceLog, 0, 200)
+	for seq := int64(401); seq <= 600; seq++ {
+		olderPageTwo = append(olderPageTwo, ServiceLog{Seq: seq, Service: "billing", Stream: "stdout", Message: fmt.Sprintf("older-2-%d", seq)})
+	}
+	m = applyUpdate(t, m, olderLogsLoadedMsg{serviceName: "billing", beforeSeq: 601, result: ServiceLogsFetchResult{
+		Status: ServiceLogsFetchOK,
+		Logs:   olderPageTwo,
+	}})
+
+	if len(m.logEntries) != 600 {
+		t.Fatalf("logEntries len after two older pages = %d, want 600", len(m.logEntries))
+	}
+	if m.logEntries[0].Seq != 401 || m.logEntries[len(m.logEntries)-1].Seq != 1000 {
+		t.Fatalf("seq bounds after two older pages = [%d ... %d], want [401 ... 1000]", m.logEntries[0].Seq, m.logEntries[len(m.logEntries)-1].Seq)
+	}
+	if got := lowestSeq(m.logEntries); got != 401 {
+		t.Fatalf("lowest seq after second older page = %d, want 401", got)
+	}
+	if len(m.logEntries) > computeLocalLogCacheLimit(&effectiveLimit) {
+		t.Fatalf("logEntries len = %d, want <= local limit %d", len(m.logEntries), computeLocalLogCacheLimit(&effectiveLimit))
+	}
+}
+
+func TestAppScenarioInitialFetchKeepsSinglePageUntilBackwardPagination(t *testing.T) {
+	m := newModel("127.0.0.1:3000", "", nil)
+	m = applyUpdate(t, m, connectDoneMsg{result: ConnectResult{Status: StatusConnected}})
+	m = applyUpdate(t, m, wsEventMsg{ok: true, event: wsclient.Event{
+		Name: "snapshot",
+		Data: json.RawMessage(`{"services":[{"name":"billing","status":"ready"}]}`),
+	}})
+
+	m = applyUpdate(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	if m.selectedServiceName() != "billing" {
+		t.Fatalf("selected service = %q, want %q", m.selectedServiceName(), "billing")
+	}
+
+	effectiveLimit := 200
+	tail := make([]ServiceLog, 0, 200)
+	for seq := int64(801); seq <= 1000; seq++ {
+		tail = append(tail, ServiceLog{Seq: seq, Service: "billing", Stream: "stdout", Message: fmt.Sprintf("tail-%d", seq)})
+	}
+	m = applyUpdate(t, m, serviceLogsLoadedMsg{serviceName: "billing", result: ServiceLogsFetchResult{
+		Status:         ServiceLogsFetchOK,
+		EffectiveLimit: &effectiveLimit,
+		Logs:           tail,
+	}})
+
+	if len(m.logEntries) != 200 {
+		t.Fatalf("logEntries len after initial fetch = %d, want 200", len(m.logEntries))
+	}
+	if m.logEntries[0].Seq != 801 || m.logEntries[len(m.logEntries)-1].Seq != 1000 {
+		t.Fatalf("seq bounds after initial fetch = [%d ... %d], want [801 ... 1000]", m.logEntries[0].Seq, m.logEntries[len(m.logEntries)-1].Seq)
+	}
+	if got := lowestSeq(m.logEntries); got != 801 {
+		t.Fatalf("lowest seq after initial fetch = %d, want 801", got)
+	}
+	if m.noOlderLogsAvailable {
+		t.Fatal("initial fetch should not imply older history is exhausted")
+	}
+}
+
+func TestAppScenarioAllLogsBackwardPaginationKeepsOlderAfterLiveAppend(t *testing.T) {
+	m := newModel("127.0.0.1:3000", "", nil)
+	m = applyUpdate(t, m, connectDoneMsg{result: ConnectResult{Status: StatusConnected}})
+	m = applyUpdate(t, m, wsEventMsg{ok: true, event: wsclient.Event{
+		Name: "snapshot",
+		Data: json.RawMessage(`{"services":[{"name":"billing","status":"ready"},{"name":"users","status":"ready"}]}`),
+	}})
+
+	if m.selectedServiceName() != allLogsName {
+		t.Fatalf("selected service = %q, want %q", m.selectedServiceName(), allLogsName)
+	}
+
+	effectiveLimit := 200
+	tail := make([]ServiceLog, 0, 200)
+	for seq := int64(801); seq <= 1000; seq++ {
+		serviceName := "billing"
+		if seq%2 == 0 {
+			serviceName = "users"
+		}
+		tail = append(tail, ServiceLog{Seq: seq, Service: serviceName, Stream: "stdout", Message: fmt.Sprintf("tail-%d", seq)})
+	}
+	m = applyUpdate(t, m, serviceLogsLoadedMsg{serviceName: allLogsName, result: ServiceLogsFetchResult{
+		Status:         ServiceLogsFetchOK,
+		EffectiveLimit: &effectiveLimit,
+		Logs:           tail,
+	}})
+
+	olderPage := make([]ServiceLog, 0, 200)
+	for seq := int64(601); seq <= 800; seq++ {
+		serviceName := "users"
+		if seq%2 == 0 {
+			serviceName = "billing"
+		}
+		olderPage = append(olderPage, ServiceLog{Seq: seq, Service: serviceName, Stream: "stdout", Message: fmt.Sprintf("older-%d", seq)})
+	}
+	m = applyUpdate(t, m, olderLogsLoadedMsg{serviceName: allLogsName, beforeSeq: 801, result: ServiceLogsFetchResult{
+		Status: ServiceLogsFetchOK,
+		Logs:   olderPage,
+	}})
+
+	if len(m.logEntries) != 400 {
+		t.Fatalf("logEntries len after all-logs older page = %d, want 400", len(m.logEntries))
+	}
+	if lowestSeq(m.logEntries) != 601 {
+		t.Fatalf("lowest seq after all-logs older page = %d, want 601", lowestSeq(m.logEntries))
+	}
+
+	m = applyUpdate(t, m, wsEventMsg{ok: true, event: wsclient.Event{
+		Name: "log",
+		Data: json.RawMessage(`{"seq":1001,"service":"users","phase":"run","stream":"stdout","message":"live-1001","timestamp":"2026-05-02T10:00:01Z"}`),
+	}})
+
+	if len(m.logEntries) != 401 {
+		t.Fatalf("logEntries len after all-logs live append = %d, want 401", len(m.logEntries))
+	}
+	if lowestSeq(m.logEntries) != 601 {
+		t.Fatalf("lowest seq after all-logs live append = %d, want 601", lowestSeq(m.logEntries))
+	}
+	foundOlder := false
+	for _, entry := range m.logEntries {
+		if entry.Seq == 650 {
+			foundOlder = true
+			break
+		}
+	}
+	if !foundOlder {
+		t.Fatal("all-logs older entries should remain present after one live append")
+	}
+	if m.footerMessage != "loaded 200 older entries" {
+		t.Fatalf("footer message after all-logs older page = %q, want %q", m.footerMessage, "loaded 200 older entries")
+	}
+	if len(m.logEntries) > computeLocalLogCacheLimit(&effectiveLimit) {
+		t.Fatalf("logEntries len = %d, want <= local limit %d", len(m.logEntries), computeLocalLogCacheLimit(&effectiveLimit))
 	}
 }
