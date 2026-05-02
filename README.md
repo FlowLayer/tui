@@ -103,6 +103,7 @@ Unknown flags or stray positional arguments print `Error: <message>`, the full h
 | `pgup` / `pgdn` | Page-scroll the logs panel |
 
 When scrolling up reaches the top of the log buffer, the TUI automatically requests older entries via `get_logs` with `before_seq`. If the server is configured with `logs.dir`, history older than the in-memory ring buffer is fetched transparently from the on-disk JSONL projection.
+When service selection changes, the logs view is cleared immediately. Late historical/replay responses that no longer match the active selection are ignored, preventing stale or mixed logs between services.
 
 **Actions**
 
