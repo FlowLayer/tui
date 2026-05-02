@@ -572,3 +572,137 @@ if m.loadingOlderLogs {
 t.Fatal("loadingOlderLogs should reset when selection changes")
 }
 }
+
+func TestAppScenarioSelectionChangeLiveLogsDoNotEvictHistory(t *testing.T) {
+	m := newModel("127.0.0.1:3000", "", nil)
+	m = applyUpdate(t, m, connectDoneMsg{result: ConnectResult{Status: StatusConnected}})
+	m = applyUpdate(t, m, wsEventMsg{ok: true, event: wsclient.Event{
+		Name: "snapshot",
+		Data: json.RawMessage(`{"services":[{"name":"billing","status":"ready"},{"name":"users","status":"ready"}]}`),
+	}})
+
+	m = applyUpdate(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	if m.selectedServiceName() != "billing" {
+		t.Fatalf("selected service = %q, want %q", m.selectedServiceName(), "billing")
+	}
+
+	m.logEntries = []ServiceLog{{Seq: 88, Service: "billing", Stream: "stdout", Message: "billing stale before switch"}}
+	m.rebuildSeenLogSeqs()
+	m.lastSeq = 100
+
+	m = applyUpdate(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	if m.selectedServiceName() != "users" {
+		t.Fatalf("selected service = %q, want %q", m.selectedServiceName(), "users")
+	}
+	if len(m.logEntries) != 0 {
+		t.Fatalf("logEntries len after switch = %d, want 0", len(m.logEntries))
+	}
+
+	for seq := int64(101); seq <= 130; seq++ {
+		m.updateLastSeq(seq)
+		if !m.appendLogEntryIfVisible(ServiceLog{Seq: seq, Service: "users", Stream: "stdout", Message: "users live while loading"}) {
+			t.Fatalf("expected live log seq=%d to be visible", seq)
+		}
+	}
+
+	limit := 10
+	loaded := make([]ServiceLog, 0, 10)
+	for seq := int64(91); seq <= 100; seq++ {
+		loaded = append(loaded, ServiceLog{Seq: seq, Service: "users", Stream: "stdout", Message: "users historical"})
+	}
+
+	m = applyUpdate(t, m, serviceLogsLoadedMsg{serviceName: "users", requestSeq: 100, result: ServiceLogsFetchResult{
+		Status:         ServiceLogsFetchOK,
+		EffectiveLimit: &limit,
+		Logs:           loaded,
+	}})
+
+	if len(m.logEntries) > limit {
+		t.Fatalf("logEntries len after merge = %d, want <= %d", len(m.logEntries), limit)
+	}
+
+	hasHistorical := false
+	hasLive := false
+	for _, entry := range m.logEntries {
+		if entry.Service != "users" {
+			t.Fatalf("entry service = %q, want users only", entry.Service)
+		}
+		if entry.Seq <= 100 {
+			hasHistorical = true
+		}
+		if entry.Seq > 100 {
+			hasLive = true
+		}
+	}
+
+	if !hasHistorical {
+		t.Fatal("expected at least one historical entry after merge")
+	}
+	if !hasLive {
+		t.Fatal("expected at least one live entry after merge")
+	}
+}
+
+func TestAppScenarioSelectionChangeManyLiveLogsKeepsHistoricalAndLive(t *testing.T) {
+	m := newModel("127.0.0.1:3000", "", nil)
+	m = applyUpdate(t, m, connectDoneMsg{result: ConnectResult{Status: StatusConnected}})
+	m = applyUpdate(t, m, wsEventMsg{ok: true, event: wsclient.Event{
+		Name: "snapshot",
+		Data: json.RawMessage(`{"services":[{"name":"billing","status":"ready"},{"name":"users","status":"ready"}]}`),
+	}})
+
+	m = applyUpdate(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	if m.selectedServiceName() != "billing" {
+		t.Fatalf("selected service = %q, want %q", m.selectedServiceName(), "billing")
+	}
+
+	m.lastSeq = 200
+	m = applyUpdate(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	if m.selectedServiceName() != "users" {
+		t.Fatalf("selected service = %q, want %q", m.selectedServiceName(), "users")
+	}
+
+	for seq := int64(201); seq <= 420; seq++ {
+		m.updateLastSeq(seq)
+		if !m.appendLogEntryIfVisible(ServiceLog{Seq: seq, Service: "users", Stream: "stdout", Message: "users live burst"}) {
+			t.Fatalf("expected live log seq=%d to be visible", seq)
+		}
+	}
+
+	loaded := make([]ServiceLog, 0, 200)
+	for seq := int64(1); seq <= 200; seq++ {
+		loaded = append(loaded, ServiceLog{Seq: seq, Service: "users", Stream: "stdout", Message: "users historical"})
+	}
+	limit := 200
+
+	m = applyUpdate(t, m, serviceLogsLoadedMsg{serviceName: "users", requestSeq: 200, result: ServiceLogsFetchResult{
+		Status:         ServiceLogsFetchOK,
+		EffectiveLimit: &limit,
+		Logs:           loaded,
+	}})
+
+	if len(m.logEntries) > limit {
+		t.Fatalf("logEntries len after merge = %d, want <= %d", len(m.logEntries), limit)
+	}
+
+	hasHistorical := false
+	hasLive := false
+	for _, entry := range m.logEntries {
+		if entry.Service != "users" {
+			t.Fatalf("entry service = %q, want users only", entry.Service)
+		}
+		if entry.Seq <= 200 {
+			hasHistorical = true
+		}
+		if entry.Seq > 200 {
+			hasLive = true
+		}
+	}
+
+	if !hasHistorical {
+		t.Fatal("expected at least one historical entry when live volume exceeds limit")
+	}
+	if !hasLive {
+		t.Fatal("expected at least one recent live entry when live volume exceeds limit")
+	}
+}

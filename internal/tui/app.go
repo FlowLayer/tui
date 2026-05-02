@@ -508,7 +508,7 @@ func (model model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			if message.serviceName == model.selectedServiceName() {
 				model.setEffectiveLogLimit(message.result.EffectiveLimit)
 				liveLogs := filterVisibleLogsAfterSeq(model.logEntries, message.serviceName, message.requestSeq)
-				model.logEntries = trimLogEntriesToEffectiveLimit(mergeLoadedAndLiveLogs(loadedLogs, liveLogs), model.effectiveLogLimit)
+				model.logEntries = mergeLoadedAndLiveLogsWithinLimit(loadedLogs, liveLogs, model.effectiveLogLimit)
 				model.logsTruncated = message.result.Truncated
 				model.rebuildSeenLogSeqs()
 				model.setLogsViewportContent()
@@ -1672,6 +1672,73 @@ func mergeLoadedAndLiveLogs(loadedLogs []ServiceLog, liveLogs []ServiceLog) []Se
 	return dedupeLogsBySeq(combined)
 }
 
+func mergeLoadedAndLiveLogsWithinLimit(loadedLogs []ServiceLog, liveLogs []ServiceLog, effectiveLimit *int) []ServiceLog {
+	loaded := dedupeLogsBySeq(loadedLogs)
+	live := dedupeLogsBySeq(liveLogs)
+
+	if len(loaded) > 0 && len(live) > 0 {
+		seenLoadedSeqs := make(map[int64]struct{}, len(loaded))
+		for _, entry := range loaded {
+			if entry.Seq <= 0 {
+				continue
+			}
+			seenLoadedSeqs[entry.Seq] = struct{}{}
+		}
+
+		filteredLive := make([]ServiceLog, 0, len(live))
+		for _, entry := range live {
+			if entry.Seq > 0 {
+				if _, exists := seenLoadedSeqs[entry.Seq]; exists {
+					continue
+				}
+			}
+			filteredLive = append(filteredLive, entry)
+		}
+		live = filteredLive
+	}
+
+	merged := mergeLoadedAndLiveLogs(loaded, live)
+	if effectiveLimit == nil || *effectiveLimit <= 0 || len(merged) <= *effectiveLimit {
+		return merged
+	}
+
+	limit := *effectiveLimit
+	if len(loaded) == 0 || len(live) == 0 {
+		return trimLogEntriesToMaxEntries(merged, limit)
+	}
+
+	historyBudget := minInt(len(loaded), maxInt(1, limit/2))
+	if len(live) < limit {
+		historyBudget = minInt(len(loaded), limit-len(live))
+		if limit > 1 && historyBudget == 0 {
+			historyBudget = 1
+		}
+	}
+
+	if limit > 1 && historyBudget >= limit {
+		historyBudget = limit - 1
+	}
+
+	liveBudget := limit - historyBudget
+	if liveBudget > len(live) {
+		liveBudget = len(live)
+		historyBudget = minInt(len(loaded), limit-liveBudget)
+	}
+
+	if limit > 1 && liveBudget == 0 && len(live) > 0 {
+		liveBudget = 1
+		historyBudget = minInt(len(loaded), limit-liveBudget)
+	}
+	if limit > 1 && historyBudget == 0 && len(loaded) > 0 {
+		historyBudget = 1
+		liveBudget = minInt(len(live), limit-historyBudget)
+	}
+
+	historyTail := trimLogEntriesToMaxEntries(loaded, historyBudget)
+	liveTail := trimLogEntriesToMaxEntries(live, liveBudget)
+	return trimLogEntriesToMaxEntries(mergeLoadedAndLiveLogs(historyTail, liveTail), limit)
+}
+
 func trimLogEntriesToMaxEntries(logs []ServiceLog, maxEntries int) []ServiceLog {
 	if maxEntries <= 0 || len(logs) <= maxEntries {
 		return logs
@@ -2332,6 +2399,13 @@ func fitLine(text string, width int) string {
 
 func maxInt(a, b int) int {
 	if a > b {
+		return a
+	}
+	return b
+}
+
+func minInt(a, b int) int {
+	if a < b {
 		return a
 	}
 	return b
