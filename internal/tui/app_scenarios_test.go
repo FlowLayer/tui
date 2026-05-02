@@ -2,6 +2,7 @@ package tui
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/FlowLayer/tui/internal/wsclient"
@@ -209,6 +210,200 @@ func TestAppScenarioLogsTruncatedTracksCurrentSelectionOnly(t *testing.T) {
 	}
 }
 
+func TestAppScenarioSelectionChangeClearsLogsImmediatelyBeforeFetchResponse(t *testing.T) {
+	m := newModel("127.0.0.1:3000", "", nil)
+	m = applyUpdate(t, m, connectDoneMsg{result: ConnectResult{Status: StatusConnected}})
+	m = applyUpdate(t, m, wsEventMsg{ok: true, event: wsclient.Event{
+		Name: "snapshot",
+		Data: json.RawMessage(`{"services":[{"name":"billing","status":"ready"},{"name":"users","status":"ready"}]}`),
+	}})
+
+	m = applyUpdate(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	if m.selectedServiceName() != "billing" {
+		t.Fatalf("selected service = %q, want %q", m.selectedServiceName(), "billing")
+	}
+
+	limit := 5
+	m.logEntries = []ServiceLog{
+		{Seq: 1, Service: "billing", Stream: "stdout", Message: "billing-1"},
+		{Seq: 2, Service: "billing", Stream: "stdout", Message: "billing-2"},
+	}
+	m.rebuildSeenLogSeqs()
+	m.logsTruncated = true
+	m.loadingOlderLogs = true
+	m.noOlderLogsAvailable = true
+	m.setEffectiveLogLimit(&limit)
+
+	m = applyUpdate(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	if m.selectedServiceName() != "users" {
+		t.Fatalf("selected service = %q, want %q", m.selectedServiceName(), "users")
+	}
+	if len(m.logEntries) != 0 {
+		t.Fatalf("logEntries len after selection change = %d, want 0", len(m.logEntries))
+	}
+	if len(m.seenLogSeqs) != 0 {
+		t.Fatalf("seenLogSeqs len after selection change = %d, want 0", len(m.seenLogSeqs))
+	}
+	if m.logsTruncated {
+		t.Fatal("logsTruncated should reset after selection change")
+	}
+	if m.loadingOlderLogs {
+		t.Fatal("loadingOlderLogs should reset after selection change")
+	}
+	if m.noOlderLogsAvailable {
+		t.Fatal("noOlderLogsAvailable should reset after selection change")
+	}
+	if m.effectiveLogLimit != nil {
+		t.Fatalf("effectiveLogLimit after selection change = %v, want nil", m.effectiveLogLimit)
+	}
+	if !strings.Contains(m.logsViewport.View(), "No logs") {
+		t.Fatalf("logs viewport should reflect cleared state, got %q", m.logsViewport.View())
+	}
+}
+
+func TestAppScenarioSelectionChangeKeepsOnlyNewServiceLiveLogsDuringFetch(t *testing.T) {
+	m := newModel("127.0.0.1:3000", "", nil)
+	m = applyUpdate(t, m, connectDoneMsg{result: ConnectResult{Status: StatusConnected}})
+	m = applyUpdate(t, m, wsEventMsg{ok: true, event: wsclient.Event{
+		Name: "snapshot",
+		Data: json.RawMessage(`{"services":[{"name":"billing","status":"ready"},{"name":"users","status":"ready"}]}`),
+	}})
+
+	m = applyUpdate(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	if m.selectedServiceName() != "billing" {
+		t.Fatalf("selected service = %q, want %q", m.selectedServiceName(), "billing")
+	}
+
+	m.logEntries = []ServiceLog{
+		{Seq: 7, Service: "billing", Stream: "stdout", Message: "billing stale 1"},
+		{Seq: 8, Service: "billing", Stream: "stdout", Message: "billing stale 2"},
+	}
+	m.rebuildSeenLogSeqs()
+	m.lastSeq = 20
+
+	m = applyUpdate(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	if m.selectedServiceName() != "users" {
+		t.Fatalf("selected service = %q, want %q", m.selectedServiceName(), "users")
+	}
+
+	m = applyUpdate(t, m, wsEventMsg{ok: true, event: wsclient.Event{
+		Name: "log",
+		Data: json.RawMessage(`{"seq":21,"service":"users","phase":"run","stream":"stdout","message":"users live while fetching","timestamp":"2026-04-14T12:00:03Z"}`),
+	}})
+
+	m = applyUpdate(t, m, serviceLogsLoadedMsg{serviceName: "users", requestSeq: 20, result: ServiceLogsFetchResult{
+		Status: ServiceLogsFetchOK,
+		Logs: []ServiceLog{
+			{Seq: 19, Service: "users", Stream: "stdout", Message: "users historical 19"},
+			{Seq: 20, Service: "users", Stream: "stdout", Message: "users historical 20"},
+		},
+	}})
+
+	if len(m.logEntries) != 3 {
+		t.Fatalf("logEntries len after users fetch merge = %d, want 3", len(m.logEntries))
+	}
+	if m.logEntries[0].Seq != 19 || m.logEntries[1].Seq != 20 || m.logEntries[2].Seq != 21 {
+		t.Fatalf("seqs after users fetch merge = [%d %d %d], want [19 20 21]", m.logEntries[0].Seq, m.logEntries[1].Seq, m.logEntries[2].Seq)
+	}
+	for _, entry := range m.logEntries {
+		if entry.Service != "users" {
+			t.Fatalf("entry service = %q, want only users entries", entry.Service)
+		}
+	}
+}
+
+func TestAppScenarioStaleServiceLogsResponseIgnoredAfterSelectionChange(t *testing.T) {
+	m := newModel("127.0.0.1:3000", "", nil)
+	m = applyUpdate(t, m, connectDoneMsg{result: ConnectResult{Status: StatusConnected}})
+	m = applyUpdate(t, m, wsEventMsg{ok: true, event: wsclient.Event{
+		Name: "snapshot",
+		Data: json.RawMessage(`{"services":[{"name":"billing","status":"ready"},{"name":"users","status":"ready"}]}`),
+	}})
+
+	m = applyUpdate(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	m = applyUpdate(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	if m.selectedServiceName() != "users" {
+		t.Fatalf("selected service = %q, want %q", m.selectedServiceName(), "users")
+	}
+
+	m = applyUpdate(t, m, wsEventMsg{ok: true, event: wsclient.Event{
+		Name: "log",
+		Data: json.RawMessage(`{"seq":50,"service":"users","phase":"run","stream":"stdout","message":"users baseline","timestamp":"2026-04-14T12:00:04Z"}`),
+	}})
+
+	if len(m.logEntries) != 1 {
+		t.Fatalf("baseline logEntries len = %d, want 1", len(m.logEntries))
+	}
+
+	m = applyUpdate(t, m, serviceLogsLoadedMsg{serviceName: "billing", requestSeq: 10, result: ServiceLogsFetchResult{
+		Status:    ServiceLogsFetchOK,
+		Truncated: true,
+		Logs: []ServiceLog{
+			{Seq: 9, Service: "billing", Stream: "stdout", Message: "billing stale historical"},
+		},
+	}})
+
+	if len(m.logEntries) != 1 {
+		t.Fatalf("logEntries len after stale billing response = %d, want 1", len(m.logEntries))
+	}
+	if m.logEntries[0].Service != "users" || m.logEntries[0].Seq != 50 {
+		t.Fatalf("log entry after stale billing response = %+v, want users seq 50", m.logEntries[0])
+	}
+	if m.logsTruncated {
+		t.Fatal("logsTruncated should not be updated by stale service response")
+	}
+}
+
+func TestAppScenarioStaleReplayLogsResponseIgnoredAfterSelectionChange(t *testing.T) {
+	m := newModel("127.0.0.1:3000", "", nil)
+	m = applyUpdate(t, m, connectDoneMsg{result: ConnectResult{Status: StatusConnected}})
+	m = applyUpdate(t, m, wsEventMsg{ok: true, event: wsclient.Event{
+		Name: "snapshot",
+		Data: json.RawMessage(`{"services":[{"name":"billing","status":"ready"},{"name":"users","status":"ready"}]}`),
+	}})
+
+	m = applyUpdate(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	if m.selectedServiceName() != "billing" {
+		t.Fatalf("selected service = %q, want %q", m.selectedServiceName(), "billing")
+	}
+
+	m = applyUpdate(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	if m.selectedServiceName() != "users" {
+		t.Fatalf("selected service = %q, want %q", m.selectedServiceName(), "users")
+	}
+
+	m = applyUpdate(t, m, wsEventMsg{ok: true, event: wsclient.Event{
+		Name: "log",
+		Data: json.RawMessage(`{"seq":60,"service":"users","phase":"run","stream":"stdout","message":"users baseline","timestamp":"2026-04-14T12:00:05Z"}`),
+	}})
+
+	if m.lastSeq != 60 {
+		t.Fatalf("lastSeq baseline = %d, want 60", m.lastSeq)
+	}
+
+	staleLimit := 7
+	m = applyUpdate(t, m, replayLogsLoadedMsg{serviceName: "billing", result: ServiceLogsFetchResult{
+		Status:         ServiceLogsFetchOK,
+		EffectiveLimit: &staleLimit,
+		Logs: []ServiceLog{
+			{Seq: 61, Service: "billing", Stream: "stdout", Message: "billing stale replay"},
+		},
+	}})
+
+	if m.effectiveLogLimit != nil {
+		t.Fatalf("effectiveLogLimit after stale replay = %v, want nil", m.effectiveLogLimit)
+	}
+	if m.lastSeq != 60 {
+		t.Fatalf("lastSeq after stale replay = %d, want 60", m.lastSeq)
+	}
+	if len(m.logEntries) != 1 {
+		t.Fatalf("logEntries len after stale replay = %d, want 1", len(m.logEntries))
+	}
+	if m.logEntries[0].Service != "users" || m.logEntries[0].Seq != 60 {
+		t.Fatalf("log entry after stale replay = %+v, want users seq 60", m.logEntries[0])
+	}
+}
+
 func TestAppScenarioServiceLogsLoadedKeepsLiveLogsAfterRequestStart(t *testing.T) {
 	m := newModel("127.0.0.1:3000", "", nil)
 	m = applyUpdate(t, m, connectDoneMsg{result: ConnectResult{Status: StatusConnected}})
@@ -268,7 +463,7 @@ func TestAppScenarioReplayAfterReconnectAndNoSeqDuplicate(t *testing.T) {
 		Data: json.RawMessage(`{"services":[{"name":"billing","status":"ready"}]}`),
 	}})
 
-	m = applyUpdate(t, m, replayLogsLoadedMsg{result: ServiceLogsFetchResult{
+	m = applyUpdate(t, m, replayLogsLoadedMsg{serviceName: "", result: ServiceLogsFetchResult{
 		Status: ServiceLogsFetchOK,
 		Logs: []ServiceLog{
 			{Seq: 20, Service: "billing", Stream: "stdout", Message: "duplicate replay"},

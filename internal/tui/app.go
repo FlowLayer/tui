@@ -58,6 +58,7 @@ type serviceLogsLoadedMsg struct {
 }
 
 type replayLogsLoadedMsg struct {
+	serviceName string
 	result ServiceLogsFetchResult
 }
 
@@ -374,11 +375,11 @@ func (model model) fetchReplayLogsCmd(afterSeq int64) tea.Cmd {
 
 	return func() tea.Msg {
 		if client == nil {
-			return replayLogsLoadedMsg{result: ServiceLogsFetchResult{Status: ServiceLogsFetchError}}
+			return replayLogsLoadedMsg{serviceName: serviceName, result: ServiceLogsFetchResult{Status: ServiceLogsFetchError}}
 		}
 
 		result := fetchLogsAfter(context.Background(), client, serviceName, cursor)
-		return replayLogsLoadedMsg{result: result}
+		return replayLogsLoadedMsg{serviceName: serviceName, result: result}
 	}
 }
 
@@ -532,6 +533,13 @@ func (model model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case replayLogsLoadedMsg:
+		currentSelection := model.selectedServiceName()
+		if currentSelection == "" {
+			break
+		}
+		if message.serviceName != model.fetchRequestTargetForSelection(currentSelection) {
+			break
+		}
 		if message.result.Status != ServiceLogsFetchOK {
 			break
 		}
@@ -734,19 +742,17 @@ func (model model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	selectedAfter := model.selectedServiceName()
 	var selectionLogsCmd tea.Cmd
 	if selectedAfter != selectedBefore {
-		model.setEffectiveLogLimit(nil)
+		model.logEntries = nil
+		model.resetSeenLogSeqs()
+		model.logsTruncated = false
 		model.loadingOlderLogs = false
 		model.noOlderLogsAvailable = false
+		model.setEffectiveLogLimit(nil)
+		model.setLogsViewportContent()
 		if selectedAfter == "" {
-			model.logEntries = nil
-			model.logsTruncated = false
-			model.resetSeenLogSeqs()
-			model.setLogsViewportContent()
 		} else if isAllLogsItem(selectedAfter) {
-			model.logsTruncated = false
 			selectionLogsCmd = model.fetchGlobalLogsCmd()
 		} else {
-			model.logsTruncated = false
 			selectionLogsCmd = model.fetchServiceLogsCmd(selectedAfter)
 		}
 	}
