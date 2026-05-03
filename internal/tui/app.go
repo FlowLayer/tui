@@ -25,10 +25,10 @@ const (
 	actionFooterTTL   = 2 * time.Second
 	serviceBusyMarker = "*"
 
-	localLogCacheMultiplier    = 10
-	localLogCacheMinEntries    = 1000
-	localLogCacheMaxEntries    = 10000
-	olderLogsPrefetchThreshold = 3
+	localCacheEffectiveLimitMultiplier = 10
+	localLogCacheMinEntries            = 1000  // Keep enough local history to preserve scrollback under live bursts.
+	localLogCacheMaxEntries            = 10000 // Hard cap to avoid unbounded local log cache growth.
+	olderLogsTriggerThreshold          = 3     // Trigger older-page fetch when viewport is this close to the top.
 
 	allLogsName      = "all logs"
 	footerCenterText = "flowlayer.tech • since 2026"
@@ -520,6 +520,7 @@ func (model model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			model.events = nil
 			model.replayPending = false
 			model.initialLogsLoading = false
+			model.noOlderLogsAvailable = false
 			model.setEffectiveLogLimit(nil)
 			model.setPersistentFooter("connection closed")
 			break
@@ -564,9 +565,9 @@ func (model model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		messageCmd = batchCmds(model.readEventCmd(), replayCmd)
 	case serviceLogsLoadedMsg:
 		message.result.Diagnostics.SelectedServiceAtResponse = model.selectedServiceName()
-			if message.serviceName == model.selectedServiceName() {
-				model.initialLogsLoading = false
-			}
+		if message.serviceName == model.selectedServiceName() {
+			model.initialLogsLoading = false
+		}
 		if message.result.Status == ServiceLogsFetchOK {
 			loadedLogs := dedupeLogsBySeq(message.result.Logs)
 			model.updateLastSeqFromLogs(loadedLogs)
@@ -868,7 +869,7 @@ func (model model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 					if olderCmd, triggered := model.maybeRequestOlderLogs(); triggered {
 						olderLogsCmd = olderCmd
 						if beforeSeq := lowestSeq(model.logEntries); beforeSeq > 0 {
-							messageCmd = batchCmds(messageCmd, model.setTransientFooter(fmt.Sprintf("loading older logs before seq %d", beforeSeq)))
+							messageCmd = batchCmds(messageCmd, model.setTransientFooter("loading older logs..."))
 						}
 					}
 				}
@@ -1317,7 +1318,7 @@ func (model model) renderFooter(width int) string {
 
 func (model model) logsFooterStatus() string {
 	parts := make([]string, 0, 2)
-	if model.logsTruncated {
+	if model.logsTruncated && !model.noOlderLogsAvailable {
 		parts = append(parts, "history truncated")
 	}
 	if indicator := model.logsScrollIndicator(); indicator != "" {
@@ -1934,7 +1935,7 @@ func (model *model) isLogsViewportNearTop() bool {
 	if model.logsViewport.AtTop() {
 		return true
 	}
-	return model.logsViewport.YOffset <= olderLogsPrefetchThreshold
+	return model.logsViewport.YOffset <= olderLogsTriggerThreshold
 }
 
 func lowestSeq(entries []ServiceLog) int64 {
@@ -1984,10 +1985,10 @@ func (model *model) setEffectiveLogLimit(limit *int) {
 func computeLocalLogCacheLimit(effectiveLimit *int) int {
 	localLimit := localLogCacheMinEntries
 	if effectiveLimit != nil && *effectiveLimit > 0 {
-		if *effectiveLimit > localLogCacheMaxEntries/localLogCacheMultiplier {
+		if *effectiveLimit > localLogCacheMaxEntries/localCacheEffectiveLimitMultiplier {
 			localLimit = localLogCacheMaxEntries
 		} else {
-			localLimit = *effectiveLimit * localLogCacheMultiplier
+			localLimit = *effectiveLimit * localCacheEffectiveLimitMultiplier
 		}
 	}
 

@@ -231,6 +231,42 @@ func TestAppScenarioSnapshotSetsConnected(t *testing.T) {
 	}
 }
 
+func TestAppScenarioWSDisconnectClearsOlderPaginationLatchWithoutDroppingLogs(t *testing.T) {
+	m := newModel("127.0.0.1:3000", "", nil)
+	m = applyUpdate(t, m, connectDoneMsg{result: ConnectResult{Status: StatusConnected}})
+	m = applyUpdate(t, m, wsEventMsg{ok: true, event: wsclient.Event{
+		Name: "snapshot",
+		Data: json.RawMessage(`{"services":[{"name":"billing","status":"ready"}]}`),
+	}})
+
+	m.logEntries = []ServiceLog{
+		{Seq: 10, Service: "billing", Stream: "stdout", Message: "kept-10"},
+		{Seq: 11, Service: "billing", Stream: "stdout", Message: "kept-11"},
+	}
+	m.rebuildSeenLogSeqs()
+	m.lastSeq = 11
+	m.logsFollow = false
+	m.noOlderLogsAvailable = true
+
+	m = applyUpdate(t, m, wsEventMsg{ok: false})
+
+	if m.noOlderLogsAvailable {
+		t.Fatal("noOlderLogsAvailable should reset on disconnect")
+	}
+	if len(m.logEntries) != 2 {
+		t.Fatalf("logEntries len after disconnect = %d, want 2", len(m.logEntries))
+	}
+	if m.logEntries[0].Seq != 10 || m.logEntries[1].Seq != 11 {
+		t.Fatalf("logEntries seqs after disconnect = [%d %d], want [10 11]", m.logEntries[0].Seq, m.logEntries[1].Seq)
+	}
+	if m.lastSeq != 11 {
+		t.Fatalf("lastSeq after disconnect = %d, want 11", m.lastSeq)
+	}
+	if m.logsFollow {
+		t.Fatal("logsFollow should remain unchanged on disconnect")
+	}
+}
+
 func TestAppScenarioWSLogSelectionFilterAndLastSeq(t *testing.T) {
 	m := newModel("127.0.0.1:3000", "", nil)
 	m = applyUpdate(t, m, connectDoneMsg{result: ConnectResult{Status: StatusConnected}})
@@ -373,6 +409,23 @@ func TestAppScenarioLogsTruncatedTracksCurrentSelectionOnly(t *testing.T) {
 	}})
 	if !m.logsTruncated {
 		t.Fatal("expected logsTruncated=true for selected fetch response")
+	}
+}
+
+func TestAppScenarioLogsFooterStatusHidesTruncationWhenOlderHistoryIsExhausted(t *testing.T) {
+	m := newModel("127.0.0.1:3000", "", nil)
+
+	m.logsTruncated = true
+	m.noOlderLogsAvailable = false
+	status := m.logsFooterStatus()
+	if !strings.Contains(status, "history truncated") {
+		t.Fatalf("logsFooterStatus() = %q, want to contain %q", status, "history truncated")
+	}
+
+	m.noOlderLogsAvailable = true
+	status = m.logsFooterStatus()
+	if strings.Contains(status, "history truncated") {
+		t.Fatalf("logsFooterStatus() = %q, should not contain %q when no older logs are available", status, "history truncated")
 	}
 }
 
@@ -1393,7 +1446,7 @@ func TestAppScenarioAllLogsBackwardPaginationKeepsOlderAfterLiveAppend(t *testin
 func TestAppScenarioMaybeRequestOlderLogsClientNilDoesNotTrigger(t *testing.T) {
 	m := newScrollableLogsFocusModel(t)
 	m.client = nil
-	m.logsViewport.SetYOffset(olderLogsPrefetchThreshold)
+	m.logsViewport.SetYOffset(olderLogsTriggerThreshold)
 
 	olderCmd, triggered := m.maybeRequestOlderLogs()
 	if triggered {
@@ -1413,7 +1466,7 @@ func TestAppScenarioMaybeRequestOlderLogsClientNilDoesNotTrigger(t *testing.T) {
 func TestAppScenarioMaybeRequestOlderLogsClientNotReadyDoesNotTrigger(t *testing.T) {
 	m := newScrollableLogsFocusModel(t)
 	m.client = wsclient.New("ws://127.0.0.1:65535/ws")
-	m.logsViewport.SetYOffset(olderLogsPrefetchThreshold)
+	m.logsViewport.SetYOffset(olderLogsTriggerThreshold)
 
 	olderCmd, triggered := m.maybeRequestOlderLogs()
 	if triggered {
@@ -1437,7 +1490,7 @@ func TestAppScenarioMaybeRequestOlderLogsClientNotReadyDoesNotTrigger(t *testing
 
 func TestAppScenarioMaybeRequestOlderLogsCommandReadyTriggersFetch(t *testing.T) {
 	m := newScrollableLogsFocusModel(t)
-	m.logsViewport.SetYOffset(olderLogsPrefetchThreshold)
+	m.logsViewport.SetYOffset(olderLogsTriggerThreshold)
 
 	olderCmd, triggered := m.maybeRequestOlderLogs()
 	if !triggered {
@@ -1453,7 +1506,7 @@ func TestAppScenarioMaybeRequestOlderLogsCommandReadyTriggersFetch(t *testing.T)
 
 func TestAppScenarioUpNearTopTriggersOlderFetch(t *testing.T) {
 	m := newScrollableLogsFocusModel(t)
-	m.logsViewport.SetYOffset(olderLogsPrefetchThreshold)
+	m.logsViewport.SetYOffset(olderLogsTriggerThreshold)
 
 	wantBeforeSeq := lowestSeq(m.logEntries)
 	if wantBeforeSeq <= 0 {
@@ -1461,7 +1514,7 @@ func TestAppScenarioUpNearTopTriggersOlderFetch(t *testing.T) {
 	}
 
 	probe := newScrollableLogsFocusModel(t)
-	probe.logsViewport.SetYOffset(olderLogsPrefetchThreshold)
+	probe.logsViewport.SetYOffset(olderLogsTriggerThreshold)
 	olderCmd, triggered := probe.maybeRequestOlderLogs()
 	if !triggered {
 		t.Fatal("maybeRequestOlderLogs should trigger near top")
@@ -1485,9 +1538,12 @@ func TestAppScenarioUpNearTopTriggersOlderFetch(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("update command should not be nil when older fetch is scheduled")
 	}
-	wantFooter := fmt.Sprintf("loading older logs before seq %d", wantBeforeSeq)
+	wantFooter := "loading older logs..."
 	if m.footerMessage != wantFooter {
 		t.Fatalf("footer message = %q, want %q", m.footerMessage, wantFooter)
+	}
+	if strings.Contains(strings.ToLower(m.footerMessage), "before seq") {
+		t.Fatalf("footer should not expose before_seq details, got %q", m.footerMessage)
 	}
 	if !m.footerTransient {
 		t.Fatal("loading older footer should be transient")
@@ -1570,7 +1626,7 @@ func TestAppScenarioOlderFetchReenabledAfterCurrentInitialLoad(t *testing.T) {
 
 func TestAppScenarioUpFarFromTopDoesNotTriggerOlderFetch(t *testing.T) {
 	m := newScrollableLogsFocusModel(t)
-	m.logsViewport.SetYOffset(olderLogsPrefetchThreshold + 8)
+	m.logsViewport.SetYOffset(olderLogsTriggerThreshold + 8)
 	footerBefore := m.footerMessage
 
 	m, _ = applyUpdateWithCmd(t, m, tea.KeyMsg{Type: tea.KeyUp})
@@ -1596,7 +1652,7 @@ func TestAppScenarioUpWithLeftFocusDoesNotTriggerOlderFetch(t *testing.T) {
 	m := newScrollableLogsFocusModel(t)
 	m.focus = focusLeft
 	m.serviceSelection = 2 // users
-	m.logsViewport.SetYOffset(olderLogsPrefetchThreshold)
+	m.logsViewport.SetYOffset(olderLogsTriggerThreshold)
 
 	m, _ = applyUpdateWithCmd(t, m, tea.KeyMsg{Type: tea.KeyUp})
 
@@ -1623,7 +1679,7 @@ func TestAppScenarioScrollUpKeysTriggerOlderFetchNearTop(t *testing.T) {
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
 			m := newScrollableLogsFocusModel(t)
-			m.logsViewport.SetYOffset(olderLogsPrefetchThreshold)
+			m.logsViewport.SetYOffset(olderLogsTriggerThreshold)
 
 			m, _ = applyUpdateWithCmd(t, m, testCase.msg)
 			if !m.loadingOlderLogs {
@@ -1672,7 +1728,7 @@ func TestAppScenarioAfterPrependOlderPageBecomesReachableWithUp(t *testing.T) {
 
 func TestAppScenarioNoDuplicateOlderFetchWhileLoading(t *testing.T) {
 	m := newScrollableLogsFocusModel(t)
-	m.logsViewport.SetYOffset(olderLogsPrefetchThreshold)
+	m.logsViewport.SetYOffset(olderLogsTriggerThreshold)
 	m.loadingOlderLogs = true
 	m.setPersistentFooter("steady")
 
