@@ -1,13 +1,20 @@
 package tui
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	protocol "github.com/FlowLayer/tui/internal/protocol"
 	"github.com/FlowLayer/tui/internal/wsclient"
 	tea "github.com/charmbracelet/bubbletea"
+	"nhooyr.io/websocket"
+	"nhooyr.io/websocket/wsjson"
 )
 
 func applyUpdate(t *testing.T, m model, msg tea.Msg) model {
@@ -52,10 +59,84 @@ func makeSequentialLogs(service string, startSeq, endSeq int64, prefix string) [
 	return logs
 }
 
+func newCommandReadyClient(t *testing.T) *wsclient.Client {
+	t.Helper()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "")
+
+		hello := protocol.Envelope{
+			Type:    protocol.MessageTypeEvent,
+			Name:    "hello",
+			Payload: json.RawMessage(`{"protocol_version":1,"server":"flowlayer"}`),
+		}
+		if err := wsjson.Write(r.Context(), conn, hello); err != nil {
+			return
+		}
+
+		snapshot := protocol.Envelope{
+			Type:    protocol.MessageTypeEvent,
+			Name:    "snapshot",
+			Payload: json.RawMessage(`{"services":[]}`),
+		}
+		if err := wsjson.Write(r.Context(), conn, snapshot); err != nil {
+			return
+		}
+
+		for {
+			var envelope protocol.Envelope
+			if err := wsjson.Read(r.Context(), conn, &envelope); err != nil {
+				return
+			}
+			if envelope.Type != protocol.MessageTypeCommand {
+				continue
+			}
+			if err := wsjson.Write(r.Context(), conn, protocol.NewAckEnvelope(envelope.ID, true, nil)); err != nil {
+				return
+			}
+			if err := wsjson.Write(r.Context(), conn, protocol.NewResultEnvelope(envelope.ID, true, nil, nil, json.RawMessage(`{"logs":[]}`))); err != nil {
+				return
+			}
+		}
+	})
+
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	url := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws"
+	client := wsclient.New(url)
+
+	connectCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if err := client.Connect(connectCtx); err != nil {
+		t.Fatalf("connect command-ready client: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = client.Close()
+	})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if client.IsCommandReady() {
+			return client
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatal("timed out waiting for command-ready wsclient")
+	return nil
+}
+
 func newScrollableLogsFocusModel(t *testing.T) model {
 	t.Helper()
 
-	m := newModel("127.0.0.1:3000", "", nil)
+	m := newModel("127.0.0.1:3000", "", newCommandReadyClient(t))
 	m = applyUpdate(t, m, connectDoneMsg{result: ConnectResult{Status: StatusConnected}})
 	m = applyUpdate(t, m, wsEventMsg{ok: true, event: wsclient.Event{
 		Name: "snapshot",
@@ -69,6 +150,7 @@ func newScrollableLogsFocusModel(t *testing.T) model {
 	m.logEntries = makeSequentialLogs("billing", 801, 1000, "tail")
 	m.rebuildSeenLogSeqs()
 	m.setLogsViewportContent()
+	m.initialLogsLoading = false
 
 	return m
 }
@@ -81,14 +163,17 @@ func TestAppScenarioWSHelloSnapshotServiceStatusLog(t *testing.T) {
 		Name: "hello",
 		Data: json.RawMessage(`{"protocol_version":1,"server":"flowlayer","capabilities":["get_snapshot"]}`),
 	}})
-	if m.connectionLabel != "Connected" {
-		t.Fatalf("connection label = %q, want %q", m.connectionLabel, "Connected")
+	if !m.replayPending {
+		t.Fatal("hello should mark replayPending=true")
 	}
 
 	m = applyUpdate(t, m, wsEventMsg{ok: true, event: wsclient.Event{
 		Name: "snapshot",
 		Data: json.RawMessage(`{"services":[{"name":"billing","status":"ready"},{"name":"users","status":"stopped"}]}`),
 	}})
+	if m.connectionLabel != "Connected" {
+		t.Fatalf("connection label = %q, want %q", m.connectionLabel, "Connected")
+	}
 	if len(m.serviceItems) != 2 {
 		t.Fatalf("services len = %d, want 2", len(m.serviceItems))
 	}
@@ -114,6 +199,35 @@ func TestAppScenarioWSHelloSnapshotServiceStatusLog(t *testing.T) {
 	}
 	if m.logEntries[0].Message != "service booted" {
 		t.Fatalf("log message = %q, want %q", m.logEntries[0].Message, "service booted")
+	}
+}
+
+func TestAppScenarioHelloAloneDoesNotSetConnected(t *testing.T) {
+	m := newModel("127.0.0.1:3000", "", nil)
+
+	m = applyUpdate(t, m, wsEventMsg{ok: true, event: wsclient.Event{
+		Name: "hello",
+		Data: json.RawMessage(`{"protocol_version":1,"server":"flowlayer","capabilities":["get_snapshot"]}`),
+	}})
+
+	if m.connectionLabel == "Connected" {
+		t.Fatalf("connection label after hello = %q, want not %q before snapshot", m.connectionLabel, "Connected")
+	}
+	if !m.replayPending {
+		t.Fatal("hello should keep replayPending=true")
+	}
+}
+
+func TestAppScenarioSnapshotSetsConnected(t *testing.T) {
+	m := newModel("127.0.0.1:3000", "", nil)
+
+	m = applyUpdate(t, m, wsEventMsg{ok: true, event: wsclient.Event{
+		Name: "snapshot",
+		Data: json.RawMessage(`{"services":[{"name":"billing","status":"ready"}]}`),
+	}})
+
+	if m.connectionLabel != "Connected" {
+		t.Fatalf("connection label after snapshot = %q, want %q", m.connectionLabel, "Connected")
 	}
 }
 
@@ -364,6 +478,72 @@ func TestAppScenarioSelectionChangeKeepsOnlyNewServiceLiveLogsDuringFetch(t *tes
 	}
 }
 
+func TestAppScenarioServiceSwitchArmsInitialLogsLoading(t *testing.T) {
+	m := newModel("127.0.0.1:3000", "", nil)
+	m = applyUpdate(t, m, connectDoneMsg{result: ConnectResult{Status: StatusConnected}})
+	m = applyUpdate(t, m, wsEventMsg{ok: true, event: wsclient.Event{
+		Name: "snapshot",
+		Data: json.RawMessage(`{"services":[{"name":"billing","status":"ready"},{"name":"users","status":"ready"}]}`),
+	}})
+
+	m = applyUpdate(t, m, serviceLogsLoadedMsg{serviceName: allLogsName, result: ServiceLogsFetchResult{Status: ServiceLogsFetchOK}})
+	if m.initialLogsLoading {
+		t.Fatal("initialLogsLoading should be false after current all-logs load completes")
+	}
+
+	m = applyUpdate(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	if m.selectedServiceName() != "billing" {
+		t.Fatalf("selected service after switch = %q, want %q", m.selectedServiceName(), "billing")
+	}
+	if !m.initialLogsLoading {
+		t.Fatal("initialLogsLoading should become true on service switch fetch")
+	}
+}
+
+func TestAppScenarioCurrentServiceLogsLoadedClearsInitialLogsLoading(t *testing.T) {
+	m := newModel("127.0.0.1:3000", "", nil)
+	m = applyUpdate(t, m, connectDoneMsg{result: ConnectResult{Status: StatusConnected}})
+	m = applyUpdate(t, m, wsEventMsg{ok: true, event: wsclient.Event{
+		Name: "snapshot",
+		Data: json.RawMessage(`{"services":[{"name":"billing","status":"ready"},{"name":"users","status":"ready"}]}`),
+	}})
+	m = applyUpdate(t, m, serviceLogsLoadedMsg{serviceName: allLogsName, result: ServiceLogsFetchResult{Status: ServiceLogsFetchOK}})
+
+	m = applyUpdate(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	if !m.initialLogsLoading {
+		t.Fatal("expected initialLogsLoading=true after switching to billing")
+	}
+
+	m = applyUpdate(t, m, serviceLogsLoadedMsg{serviceName: "billing", result: ServiceLogsFetchResult{Status: ServiceLogsFetchOK}})
+	if m.initialLogsLoading {
+		t.Fatal("initialLogsLoading should clear when current selection load resolves")
+	}
+}
+
+func TestAppScenarioStaleServiceLogsLoadedDoesNotClearInitialLogsLoading(t *testing.T) {
+	m := newModel("127.0.0.1:3000", "", nil)
+	m = applyUpdate(t, m, connectDoneMsg{result: ConnectResult{Status: StatusConnected}})
+	m = applyUpdate(t, m, wsEventMsg{ok: true, event: wsclient.Event{
+		Name: "snapshot",
+		Data: json.RawMessage(`{"services":[{"name":"billing","status":"ready"},{"name":"users","status":"ready"}]}`),
+	}})
+	m = applyUpdate(t, m, serviceLogsLoadedMsg{serviceName: allLogsName, result: ServiceLogsFetchResult{Status: ServiceLogsFetchOK}})
+
+	m = applyUpdate(t, m, tea.KeyMsg{Type: tea.KeyDown}) // billing
+	m = applyUpdate(t, m, tea.KeyMsg{Type: tea.KeyDown}) // users
+	if m.selectedServiceName() != "users" {
+		t.Fatalf("selected service after second switch = %q, want %q", m.selectedServiceName(), "users")
+	}
+	if !m.initialLogsLoading {
+		t.Fatal("initialLogsLoading should remain true while users initial fetch is pending")
+	}
+
+	m = applyUpdate(t, m, serviceLogsLoadedMsg{serviceName: "billing", result: ServiceLogsFetchResult{Status: ServiceLogsFetchOK}})
+	if !m.initialLogsLoading {
+		t.Fatal("stale billing response should not clear users initialLogsLoading")
+	}
+}
+
 func TestAppScenarioStaleServiceLogsResponseIgnoredAfterSelectionChange(t *testing.T) {
 	m := newModel("127.0.0.1:3000", "", nil)
 	m = applyUpdate(t, m, connectDoneMsg{result: ConnectResult{Status: StatusConnected}})
@@ -507,8 +687,11 @@ func TestAppScenarioServiceLogsLoadedKeepsLiveLogsAfterRequestStart(t *testing.T
 	if m.logEntries[2].Seq != 31 {
 		t.Fatalf("third seq = %d, want 31", m.logEntries[2].Seq)
 	}
-	if m.logsFollow {
-		t.Fatal("expected follow mode disabled after historical load")
+	if !m.logsFollow {
+		t.Fatal("expected follow mode enabled after historical load")
+	}
+	if !m.logsViewport.AtBottom() {
+		t.Fatal("viewport should remain at bottom after historical load")
 	}
 	if m.footerMessage != "loaded 2 historical entries" {
 		t.Fatalf("footer message = %q, want %q", m.footerMessage, "loaded 2 historical entries")
@@ -694,7 +877,7 @@ func TestAppScenarioOlderLogsRequestFailedFooterIsExplicit(t *testing.T) {
 	m.rebuildSeenLogSeqs()
 	m.loadingOlderLogs = true
 
-	m = applyUpdate(t, m, olderLogsLoadedMsg{serviceName: "billing", beforeSeq: 10, result: ServiceLogsFetchResult{Status: ServiceLogsFetchRequestFailed}})
+	m = applyUpdate(t, m, olderLogsLoadedMsg{serviceName: "billing", beforeSeq: 10, result: ServiceLogsFetchResult{Status: ServiceLogsFetchRequestFailed, FailureReason: runCommandFailureContextTimeout}})
 
 	if m.loadingOlderLogs {
 		t.Fatal("loadingOlderLogs should clear after failed older response")
@@ -705,8 +888,67 @@ func TestAppScenarioOlderLogsRequestFailedFooterIsExplicit(t *testing.T) {
 	if !strings.HasPrefix(m.footerMessage, "older") {
 		t.Fatalf("older fetch failure footer = %q, want prefix %q", m.footerMessage, "older")
 	}
+	if !strings.Contains(strings.ToLower(m.footerMessage), "timeout") {
+		t.Fatalf("older fetch failure footer = %q, want to contain %q", m.footerMessage, "timeout")
+	}
 	if !m.footerTransient {
 		t.Fatal("older fetch failure footer should be transient")
+	}
+}
+
+func TestAppScenarioOlderFetchCmdCarriesDiagnostics(t *testing.T) {
+	m := newModel("127.0.0.1:3000", "", nil)
+	m = applyUpdate(t, m, connectDoneMsg{result: ConnectResult{Status: StatusConnected}})
+	m = applyUpdate(t, m, wsEventMsg{ok: true, event: wsclient.Event{
+		Name: "snapshot",
+		Data: json.RawMessage(`{"services":[{"name":"billing","status":"ready"}]}`),
+	}})
+	m = applyUpdate(t, m, tea.KeyMsg{Type: tea.KeyDown})
+
+	effectiveLimit := 75
+	m.setEffectiveLogLimit(&effectiveLimit)
+	m.logEntries = []ServiceLog{
+		{Seq: 10, Service: "billing", Stream: "stdout", Message: "ten"},
+		{Seq: 11, Service: "billing", Stream: "stdout", Message: "eleven"},
+	}
+	m.rebuildSeenLogSeqs()
+
+	msg := m.fetchOlderLogsCmd("billing", 10)()
+	olderMsg, ok := msg.(olderLogsLoadedMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want olderLogsLoadedMsg", msg)
+	}
+
+	diagnostics := olderMsg.result.Diagnostics
+	if diagnostics.Kind != logsFetchKindOlder {
+		t.Fatalf("diagnostics kind = %q, want %q", diagnostics.Kind, logsFetchKindOlder)
+	}
+	if diagnostics.RequestedServiceName != "billing" {
+		t.Fatalf("diagnostics requested service = %q, want %q", diagnostics.RequestedServiceName, "billing")
+	}
+	if diagnostics.PayloadServiceName != "billing" {
+		t.Fatalf("diagnostics payload service = %q, want %q", diagnostics.PayloadServiceName, "billing")
+	}
+	if diagnostics.BeforeSeq != 10 {
+		t.Fatalf("diagnostics before_seq = %d, want 10", diagnostics.BeforeSeq)
+	}
+	if diagnostics.Limit != effectiveLimit {
+		t.Fatalf("diagnostics limit = %d, want %d", diagnostics.Limit, effectiveLimit)
+	}
+	if diagnostics.LowestSeqAtFetch != 10 {
+		t.Fatalf("diagnostics lowest seq = %d, want 10", diagnostics.LowestSeqAtFetch)
+	}
+	if diagnostics.LogEntriesLenAtFetch != 2 {
+		t.Fatalf("diagnostics log entries len = %d, want 2", diagnostics.LogEntriesLenAtFetch)
+	}
+	if diagnostics.ClientReady {
+		t.Fatal("diagnostics client ready should be false with nil client")
+	}
+	if diagnostics.SelectedServiceAtFetch != "billing" {
+		t.Fatalf("diagnostics selected at fetch = %q, want %q", diagnostics.SelectedServiceAtFetch, "billing")
+	}
+	if diagnostics.EffectiveLogLimitAtFetch == nil || *diagnostics.EffectiveLogLimitAtFetch != effectiveLimit {
+		t.Fatalf("diagnostics effective log limit = %v, want %d", diagnostics.EffectiveLogLimitAtFetch, effectiveLimit)
 	}
 }
 
@@ -726,6 +968,7 @@ func TestAppScenarioSelectionChangeLiveLogsDoNotEvictHistory(t *testing.T) {
 	m.logEntries = []ServiceLog{{Seq: 88, Service: "billing", Stream: "stdout", Message: "billing stale before switch"}}
 	m.rebuildSeenLogSeqs()
 	m.lastSeq = 100
+	m.logsFollow = false
 
 	m = applyUpdate(t, m, tea.KeyMsg{Type: tea.KeyDown})
 	if m.selectedServiceName() != "users" {
@@ -733,6 +976,9 @@ func TestAppScenarioSelectionChangeLiveLogsDoNotEvictHistory(t *testing.T) {
 	}
 	if len(m.logEntries) != 0 {
 		t.Fatalf("logEntries len after switch = %d, want 0", len(m.logEntries))
+	}
+	if !m.logsFollow {
+		t.Fatal("selection change should re-enable follow mode")
 	}
 
 	for seq := int64(101); seq <= 130; seq++ {
@@ -778,15 +1024,18 @@ func TestAppScenarioSelectionChangeLiveLogsDoNotEvictHistory(t *testing.T) {
 	if !hasLive {
 		t.Fatal("expected at least one live entry after merge")
 	}
-	if m.logsFollow {
-		t.Fatal("expected follow mode disabled after non-empty historical response")
+	if !m.logsFollow {
+		t.Fatal("expected follow mode enabled after non-empty historical response")
+	}
+	if !m.logsViewport.AtBottom() {
+		t.Fatal("viewport should be at bottom after service historical load")
 	}
 	if m.footerMessage != "loaded 10 historical entries" {
 		t.Fatalf("footer message = %q, want %q", m.footerMessage, "loaded 10 historical entries")
 	}
 }
 
-func TestAppScenarioHistoricalLoadKeepsViewportAtTopAndShowsLoadedFooter(t *testing.T) {
+func TestAppScenarioHistoricalLoadFollowsTailAndShowsLoadedFooter(t *testing.T) {
 	m := newModel("127.0.0.1:3000", "", nil)
 	m = applyUpdate(t, m, connectDoneMsg{result: ConnectResult{Status: StatusConnected}})
 	m = applyUpdate(t, m, wsEventMsg{ok: true, event: wsclient.Event{
@@ -809,14 +1058,14 @@ func TestAppScenarioHistoricalLoadKeepsViewportAtTopAndShowsLoadedFooter(t *test
 		Logs:   loaded,
 	}})
 
-	if m.logsFollow {
-		t.Fatal("expected follow mode disabled after non-empty historical all-logs response")
+	if !m.logsFollow {
+		t.Fatal("expected follow mode enabled after non-empty historical all-logs response")
 	}
-	if m.logsViewport.YOffset != 0 {
-		t.Fatalf("viewport yOffset after historical load = %d, want 0", m.logsViewport.YOffset)
+	if m.logsViewport.YOffset <= 0 {
+		t.Fatalf("viewport yOffset after historical load = %d, want > 0", m.logsViewport.YOffset)
 	}
-	if m.logsViewport.AtBottom() {
-		t.Fatal("viewport should not jump to bottom right after historical load")
+	if !m.logsViewport.AtBottom() {
+		t.Fatal("viewport should jump to bottom after historical load")
 	}
 	if m.footerMessage != "loaded 120 historical entries" {
 		t.Fatalf("footer message = %q, want %q", m.footerMessage, "loaded 120 historical entries")
@@ -1141,6 +1390,67 @@ func TestAppScenarioAllLogsBackwardPaginationKeepsOlderAfterLiveAppend(t *testin
 	}
 }
 
+func TestAppScenarioMaybeRequestOlderLogsClientNilDoesNotTrigger(t *testing.T) {
+	m := newScrollableLogsFocusModel(t)
+	m.client = nil
+	m.logsViewport.SetYOffset(olderLogsPrefetchThreshold)
+
+	olderCmd, triggered := m.maybeRequestOlderLogs()
+	if triggered {
+		t.Fatal("maybeRequestOlderLogs should not trigger when client is nil")
+	}
+	if olderCmd != nil {
+		t.Fatal("maybeRequestOlderLogs command should be nil when client is nil")
+	}
+	if m.loadingOlderLogs {
+		t.Fatal("loadingOlderLogs should remain false when client is nil")
+	}
+	if m.noOlderLogsAvailable {
+		t.Fatal("noOlderLogsAvailable should remain false when client is nil")
+	}
+}
+
+func TestAppScenarioMaybeRequestOlderLogsClientNotReadyDoesNotTrigger(t *testing.T) {
+	m := newScrollableLogsFocusModel(t)
+	m.client = wsclient.New("ws://127.0.0.1:65535/ws")
+	m.logsViewport.SetYOffset(olderLogsPrefetchThreshold)
+
+	olderCmd, triggered := m.maybeRequestOlderLogs()
+	if triggered {
+		t.Fatal("maybeRequestOlderLogs should not trigger when client is not command-ready")
+	}
+	if olderCmd != nil {
+		t.Fatal("maybeRequestOlderLogs command should be nil when client is not command-ready")
+	}
+	if m.loadingOlderLogs {
+		t.Fatal("loadingOlderLogs should remain false when client is not command-ready")
+	}
+	if m.noOlderLogsAvailable {
+		t.Fatal("noOlderLogsAvailable should remain false when client is not command-ready")
+	}
+
+	m, _ = applyUpdateWithCmd(t, m, tea.KeyMsg{Type: tea.KeyUp})
+	if strings.Contains(strings.ToLower(m.footerMessage), "older logs fetch failed") {
+		t.Fatalf("footer should not report older fetch failure when command-ready guard blocks request; got %q", m.footerMessage)
+	}
+}
+
+func TestAppScenarioMaybeRequestOlderLogsCommandReadyTriggersFetch(t *testing.T) {
+	m := newScrollableLogsFocusModel(t)
+	m.logsViewport.SetYOffset(olderLogsPrefetchThreshold)
+
+	olderCmd, triggered := m.maybeRequestOlderLogs()
+	if !triggered {
+		t.Fatal("maybeRequestOlderLogs should trigger when client is command-ready")
+	}
+	if olderCmd == nil {
+		t.Fatal("maybeRequestOlderLogs should return a command when client is command-ready")
+	}
+	if !m.loadingOlderLogs {
+		t.Fatal("loadingOlderLogs should become true when command-ready older fetch is scheduled")
+	}
+}
+
 func TestAppScenarioUpNearTopTriggersOlderFetch(t *testing.T) {
 	m := newScrollableLogsFocusModel(t)
 	m.logsViewport.SetYOffset(olderLogsPrefetchThreshold)
@@ -1181,6 +1491,80 @@ func TestAppScenarioUpNearTopTriggersOlderFetch(t *testing.T) {
 	}
 	if !m.footerTransient {
 		t.Fatal("loading older footer should be transient")
+	}
+}
+
+func TestAppScenarioLiveLogsDuringInitialLoadDoNotTriggerOlderFetch(t *testing.T) {
+	m := newModel("127.0.0.1:3000", "", nil)
+	m = applyUpdate(t, m, connectDoneMsg{result: ConnectResult{Status: StatusConnected}})
+	m = applyUpdate(t, m, wsEventMsg{ok: true, event: wsclient.Event{
+		Name: "snapshot",
+		Data: json.RawMessage(`{"services":[{"name":"billing","status":"ready"},{"name":"users","status":"ready"}]}`),
+	}})
+	m = applyUpdate(t, m, serviceLogsLoadedMsg{serviceName: allLogsName, result: ServiceLogsFetchResult{Status: ServiceLogsFetchOK}})
+
+	m = applyUpdate(t, m, tea.KeyMsg{Type: tea.KeyDown}) // billing, starts initial fetch
+	if !m.initialLogsLoading {
+		t.Fatal("expected initialLogsLoading=true after switching to billing")
+	}
+
+	m.focus = focusRight
+	m = applyUpdate(t, m, wsEventMsg{ok: true, event: wsclient.Event{
+		Name: "log",
+		Data: json.RawMessage(`{"seq":101,"service":"billing","phase":"run","stream":"stdout","message":"live-before-initial","timestamp":"2026-04-14T12:00:03Z"}`),
+	}})
+	if len(m.logEntries) == 0 {
+		t.Fatal("expected live billing log to be visible before initial response")
+	}
+	m.logsViewport.SetYOffset(0)
+
+	footerBefore := m.footerMessage
+	m, _ = applyUpdateWithCmd(t, m, tea.KeyMsg{Type: tea.KeyUp})
+	if m.loadingOlderLogs {
+		t.Fatal("loadingOlderLogs should stay false while initialLogsLoading=true")
+	}
+	if m.noOlderLogsAvailable {
+		t.Fatal("noOlderLogsAvailable should not change while older fetch is blocked")
+	}
+	if strings.HasPrefix(strings.ToLower(m.footerMessage), "loading older logs") {
+		t.Fatalf("footer should not advertise older fetch while blocked; got %q", m.footerMessage)
+	}
+	if m.footerMessage != footerBefore {
+		t.Fatalf("footer message changed unexpectedly while older fetch is blocked: got %q, want %q", m.footerMessage, footerBefore)
+	}
+}
+
+func TestAppScenarioOlderFetchReenabledAfterCurrentInitialLoad(t *testing.T) {
+	m := newModel("127.0.0.1:3000", "", nil)
+	m = applyUpdate(t, m, connectDoneMsg{result: ConnectResult{Status: StatusConnected}})
+	m = applyUpdate(t, m, wsEventMsg{ok: true, event: wsclient.Event{
+		Name: "snapshot",
+		Data: json.RawMessage(`{"services":[{"name":"billing","status":"ready"},{"name":"users","status":"ready"}]}`),
+	}})
+	m = applyUpdate(t, m, serviceLogsLoadedMsg{serviceName: allLogsName, result: ServiceLogsFetchResult{Status: ServiceLogsFetchOK}})
+
+	m = applyUpdate(t, m, tea.KeyMsg{Type: tea.KeyDown}) // billing
+	m.focus = focusRight
+	m = applyUpdate(t, m, wsEventMsg{ok: true, event: wsclient.Event{
+		Name: "log",
+		Data: json.RawMessage(`{"seq":101,"service":"billing","phase":"run","stream":"stdout","message":"live-before-initial","timestamp":"2026-04-14T12:00:03Z"}`),
+	}})
+
+	m = applyUpdate(t, m, serviceLogsLoadedMsg{serviceName: "billing", requestSeq: 100, result: ServiceLogsFetchResult{
+		Status: ServiceLogsFetchOK,
+		Logs: []ServiceLog{
+			{Seq: 100, Service: "billing", Stream: "stdout", Message: "historical-before-live"},
+		},
+	}})
+	if m.initialLogsLoading {
+		t.Fatal("initialLogsLoading should be false after current service load")
+	}
+	m.client = newCommandReadyClient(t)
+
+	m.logsViewport.SetYOffset(0)
+	m, _ = applyUpdateWithCmd(t, m, tea.KeyMsg{Type: tea.KeyUp})
+	if !m.loadingOlderLogs {
+		t.Fatal("loadingOlderLogs should become true once initialLogsLoading is cleared")
 	}
 }
 
@@ -1268,6 +1652,12 @@ func TestAppScenarioAfterPrependOlderPageBecomesReachableWithUp(t *testing.T) {
 	}
 	if m.logsViewport.YOffset <= beforePrependYOffset {
 		t.Fatalf("yOffset after prepend = %d, want > %d to preserve anchor", m.logsViewport.YOffset, beforePrependYOffset)
+	}
+	if m.logsFollow {
+		t.Fatal("follow mode should stay disabled after prepending older logs")
+	}
+	if m.logsViewport.AtBottom() {
+		t.Fatal("older logs prepend should preserve anchor, not force viewport to bottom")
 	}
 
 	yOffsetAfterPrepend := m.logsViewport.YOffset

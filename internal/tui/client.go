@@ -3,6 +3,8 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net"
 	"strconv"
 	"strings"
@@ -72,12 +74,48 @@ const (
 // historical view, even though logs eventually arrive.
 const getLogsTimeout = 30 * time.Second
 
+const (
+	logsFetchKindInitial = "initial"
+	logsFetchKindOlder   = "older"
+	logsFetchKindReplay  = "replay"
+
+	commandIDUnavailable = "unavailable"
+
+	runCommandFailureClientNil           = "client nil"
+	runCommandFailureSendCommandError    = "send command error"
+	runCommandFailureContextTimeout      = "context timeout"
+	runCommandFailureContextCanceled     = "context canceled"
+	runCommandFailureContextDone         = "context done"
+	runCommandFailureResultChannelClosed = "result channel closed"
+	runCommandFailureResultInvalidated   = "result invalidated"
+)
+
+type ServiceLogsFetchDiagnostics struct {
+	Kind                      string
+	CommandID                 string
+	RequestedServiceName      string
+	PayloadServiceName        string
+	BeforeSeq                 int64
+	AfterSeq                  int64
+	Limit                     int
+	EffectiveLogLimitAtFetch  *int
+	LowestSeqAtFetch          int64
+	LogEntriesLenAtFetch      int
+	ClientReady               bool
+	SelectedServiceAtFetch    string
+	SelectedServiceAtResponse string
+}
+
 type ServiceLogsFetchResult struct {
 	Status         ServiceLogsFetchStatus
 	Logs           []ServiceLog
 	Truncated      bool
 	EffectiveLimit *int
+	FailureReason  string
+	Diagnostics    ServiceLogsFetchDiagnostics
 }
+
+var runCommandDetailedHook = runCommandDetailed
 
 type ConnectResult struct {
 	Status   ConnectionStatus
@@ -317,22 +355,27 @@ func sendGlobalAction(ctx context.Context, client *wsclient.Client, action Servi
 }
 
 func fetchLogs(ctx context.Context, client *wsclient.Client, serviceName string) ServiceLogsFetchResult {
-	return fetchLogsRequest(ctx, client, serviceName, 0, 0, 0)
+	return fetchLogsRequestWithKind(ctx, client, serviceName, 0, 0, 0, logsFetchKindInitial)
 }
 
 func fetchLogsAfter(ctx context.Context, client *wsclient.Client, serviceName string, afterSeq int64) ServiceLogsFetchResult {
-	return fetchLogsRequest(ctx, client, serviceName, afterSeq, 0, 0)
+	return fetchLogsRequestWithKind(ctx, client, serviceName, afterSeq, 0, 0, logsFetchKindReplay)
 }
 
 // fetchLogsBefore requests entries with seq strictly less than beforeSeq,
 // capped at limit (0 = let the server decide). Used by the log-view UI to
 // load older history when the user scrolls past the top of the buffer.
 func fetchLogsBefore(ctx context.Context, client *wsclient.Client, serviceName string, beforeSeq int64, limit int) ServiceLogsFetchResult {
-	return fetchLogsRequest(ctx, client, serviceName, 0, beforeSeq, limit)
+	return fetchLogsRequestWithKind(ctx, client, serviceName, 0, beforeSeq, limit, logsFetchKindOlder)
 }
 
 func fetchLogsRequest(ctx context.Context, client *wsclient.Client, serviceName string, afterSeq int64, beforeSeq int64, limit int) ServiceLogsFetchResult {
+	return fetchLogsRequestWithKind(ctx, client, serviceName, afterSeq, beforeSeq, limit, logsFetchKindInitial)
+}
+
+func fetchLogsRequestWithKind(ctx context.Context, client *wsclient.Client, serviceName string, afterSeq int64, beforeSeq int64, limit int, kind string) ServiceLogsFetchResult {
 	commandPayload := buildGetLogsPayload(serviceName, afterSeq, beforeSeq, limit)
+	diagnostics := newServiceLogsFetchDiagnostics(kind, serviceName, commandPayload, afterSeq, beforeSeq, limit, client != nil)
 
 	runCtx := ctx
 	if runCtx == nil {
@@ -344,35 +387,135 @@ func fetchLogsRequest(ctx context.Context, client *wsclient.Client, serviceName 
 		defer cancel()
 	}
 
-	result, ok := runCommand(runCtx, client, "get_logs", commandPayload)
+	result, ok, failureReason := runCommandDetailedHook(runCtx, client, "get_logs", commandPayload)
 	if !ok {
-		return ServiceLogsFetchResult{Status: ServiceLogsFetchRequestFailed}
+		return ServiceLogsFetchResult{
+			Status:        ServiceLogsFetchRequestFailed,
+			FailureReason: normalizeFailureReason(failureReason),
+			Diagnostics:   diagnostics,
+		}
 	}
 
 	if !result.Accepted {
+		ackRejectedReason := formatAckRejectedReason(result)
 		switch commandErrorCode(result) {
 		case "invalid_payload":
-			return ServiceLogsFetchResult{Status: ServiceLogsFetchBadRequest}
+			return ServiceLogsFetchResult{Status: ServiceLogsFetchBadRequest, FailureReason: ackRejectedReason, Diagnostics: diagnostics}
 		case "unknown_service":
-			return ServiceLogsFetchResult{Status: ServiceLogsFetchUnknownService}
+			return ServiceLogsFetchResult{Status: ServiceLogsFetchUnknownService, FailureReason: ackRejectedReason, Diagnostics: diagnostics}
 		default:
-			return ServiceLogsFetchResult{Status: ServiceLogsFetchError}
+			return ServiceLogsFetchResult{Status: ServiceLogsFetchError, FailureReason: ackRejectedReason, Diagnostics: diagnostics}
 		}
 	}
 
 	if result.Result == nil {
-		return ServiceLogsFetchResult{Status: ServiceLogsFetchError}
+		return ServiceLogsFetchResult{Status: ServiceLogsFetchError, FailureReason: "missing result payload", Diagnostics: diagnostics}
 	}
 	if !result.Result.OK {
-		return ServiceLogsFetchResult{Status: ServiceLogsFetchError}
+		return ServiceLogsFetchResult{Status: ServiceLogsFetchError, FailureReason: formatResultFailureReason(result), Diagnostics: diagnostics}
 	}
 
 	decoded, ok := decodeLogsResultPayload(result.Result.Data)
 	if !ok {
-		return ServiceLogsFetchResult{Status: ServiceLogsFetchError}
+		return ServiceLogsFetchResult{Status: ServiceLogsFetchError, FailureReason: "decode get_logs result payload failed", Diagnostics: diagnostics}
 	}
+	decoded.Diagnostics = diagnostics
 
 	return decoded
+}
+
+func newServiceLogsFetchDiagnostics(kind string, requestedServiceName string, commandPayload any, afterSeq int64, beforeSeq int64, limit int, clientReady bool) ServiceLogsFetchDiagnostics {
+	return ServiceLogsFetchDiagnostics{
+		Kind:                 normalizeFetchKind(kind),
+		CommandID:            commandIDUnavailable,
+		RequestedServiceName: strings.TrimSpace(requestedServiceName),
+		PayloadServiceName:   payloadServiceNameFromCommandPayload(commandPayload),
+		BeforeSeq:            beforeSeq,
+		AfterSeq:             afterSeq,
+		Limit:                limit,
+		ClientReady:          clientReady,
+	}
+}
+
+func normalizeFetchKind(kind string) string {
+	switch strings.TrimSpace(kind) {
+	case logsFetchKindInitial:
+		return logsFetchKindInitial
+	case logsFetchKindOlder:
+		return logsFetchKindOlder
+	case logsFetchKindReplay:
+		return logsFetchKindReplay
+	default:
+		return logsFetchKindInitial
+	}
+}
+
+func payloadServiceNameFromCommandPayload(commandPayload any) string {
+	decoded, ok := commandPayload.(map[string]any)
+	if !ok {
+		return ""
+	}
+
+	rawService, ok := decoded["service"]
+	if !ok {
+		return ""
+	}
+
+	serviceName, ok := rawService.(string)
+	if !ok {
+		return ""
+	}
+
+	return strings.TrimSpace(serviceName)
+}
+
+func normalizeFailureReason(reason string) string {
+	trimmed := strings.TrimSpace(reason)
+	if trimmed == "" {
+		return "request failed"
+	}
+	return trimmed
+}
+
+func formatAckRejectedReason(result wsclient.CommandResult) string {
+	summary := ""
+	if result.AckError != nil {
+		summary = commandErrorSummary(result.AckError.Code, result.AckError.Message)
+	}
+	if summary == "" {
+		return "ack rejected"
+	}
+	return "ack rejected: " + summary
+}
+
+func formatResultFailureReason(result wsclient.CommandResult) string {
+	if result.Result == nil {
+		return "result not ok"
+	}
+
+	summary := ""
+	if result.Result.Error != nil {
+		summary = commandErrorSummary(result.Result.Error.Code, result.Result.Error.Message)
+	}
+	if summary == "" {
+		return "result not ok"
+	}
+	return "result not ok: " + summary
+}
+
+func commandErrorSummary(code string, message string) string {
+	code = strings.TrimSpace(code)
+	message = strings.TrimSpace(message)
+	if code == "" && message == "" {
+		return ""
+	}
+	if code != "" && message != "" {
+		return code + ": " + message
+	}
+	if code != "" {
+		return code
+	}
+	return message
 }
 
 func buildGetLogsPayload(serviceName string, afterSeq int64, beforeSeq int64, limit int) any {
@@ -439,8 +582,23 @@ func decodeLogsResultPayload(data json.RawMessage) (ServiceLogsFetchResult, bool
 }
 
 func runCommand(ctx context.Context, client *wsclient.Client, name string, payload any) (wsclient.CommandResult, bool) {
+	result, ok, _ := runCommandDetailed(ctx, client, name, payload)
+	return result, ok
+}
+
+type runCommandSender func(context.Context, *wsclient.Client, string, any) (<-chan wsclient.CommandResult, error)
+
+func runCommandDetailed(ctx context.Context, client *wsclient.Client, name string, payload any) (wsclient.CommandResult, bool, string) {
+	return runCommandDetailedWithSender(ctx, client, name, payload, defaultRunCommandSender)
+}
+
+func runCommandDetailedWithSender(ctx context.Context, client *wsclient.Client, name string, payload any, sender runCommandSender) (wsclient.CommandResult, bool, string) {
 	if client == nil {
-		return wsclient.CommandResult{}, false
+		return wsclient.CommandResult{}, false, runCommandFailureClientNil
+	}
+
+	if sender == nil {
+		sender = defaultRunCommandSender
 	}
 
 	runCtx := ctx
@@ -454,23 +612,44 @@ func runCommand(ctx context.Context, client *wsclient.Client, name string, paylo
 	}
 	defer cancel()
 
-	resultCh, err := client.SendCommand(runCtx, name, payload)
+	resultCh, err := sender(runCtx, client, name, payload)
 	if err != nil {
-		return wsclient.CommandResult{}, false
+		if reason := describeRunContextDone(runCtx); reason != "" {
+			return wsclient.CommandResult{}, false, reason
+		}
+		return wsclient.CommandResult{}, false, fmt.Sprintf("%s: %v", runCommandFailureSendCommandError, err)
 	}
 
 	select {
 	case <-runCtx.Done():
-		return wsclient.CommandResult{}, false
+		return wsclient.CommandResult{}, false, describeRunContextDone(runCtx)
 	case result, ok := <-resultCh:
 		if !ok {
-			return wsclient.CommandResult{}, false
+			return wsclient.CommandResult{}, false, runCommandFailureResultChannelClosed
 		}
 		if result.Invalidated {
-			return wsclient.CommandResult{}, false
+			return wsclient.CommandResult{}, false, runCommandFailureResultInvalidated
 		}
-		return result, true
+		return result, true, ""
 	}
+}
+
+func defaultRunCommandSender(ctx context.Context, client *wsclient.Client, name string, payload any) (<-chan wsclient.CommandResult, error) {
+	return client.SendCommand(ctx, name, payload)
+}
+
+func describeRunContextDone(ctx context.Context) string {
+	err := ctx.Err()
+	if errors.Is(err, context.DeadlineExceeded) {
+		return runCommandFailureContextTimeout
+	}
+	if errors.Is(err, context.Canceled) {
+		return runCommandFailureContextCanceled
+	}
+	if err != nil {
+		return fmt.Sprintf("%s: %v", runCommandFailureContextDone, err)
+	}
+	return ""
 }
 
 func commandErrorCode(result wsclient.CommandResult) string {

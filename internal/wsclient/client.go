@@ -21,6 +21,9 @@ import (
 const (
 	writeQueueSize = 32
 	eventsBuffer   = 128
+	// websocketReadLimitBytes raises the per-message read ceiling so
+	// get_logs historical responses larger than the default 32 KiB still fit.
+	websocketReadLimitBytes int64 = 16 * 1024 * 1024
 )
 
 var (
@@ -217,6 +220,16 @@ func (c *Client) SendCommand(ctx context.Context, name string, payload any) (<-c
 	return resultCh, nil
 }
 
+// IsCommandReady reports whether the client can accept view/action commands.
+// The command plane is considered ready only after the hello+snapshot
+// handshake completed and the active session writer/cancel handles exist.
+func (c *Client) IsCommandReady() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.state == stateConnected && c.writeQueue != nil && c.sessionCancel != nil
+}
+
 func (c *Client) Events() <-chan Event {
 	return c.events
 }
@@ -260,6 +273,8 @@ func (c *Client) runReconnectLoop(initialReady chan<- error) {
 			backoff = nextBackoff(backoff)
 			continue
 		}
+
+		conn.SetReadLimit(websocketReadLimitBytes)
 
 		backoff = initialBackoff
 		shouldReconnect := c.runSession(conn, func() {

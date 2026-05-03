@@ -51,6 +51,224 @@ func TestConnectHandshakeTransitionsToConnected(t *testing.T) {
 	}
 }
 
+func TestIsCommandReadyNewClientFalse(t *testing.T) {
+	client := New("ws://example.invalid/ws")
+
+	if client.IsCommandReady() {
+		t.Fatal("new client should not be command-ready")
+	}
+}
+
+func TestIsCommandReadyClosedClientFalse(t *testing.T) {
+	client := New("ws://example.invalid/ws")
+
+	if err := client.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if client.IsCommandReady() {
+		t.Fatal("closed client should not be command-ready")
+	}
+}
+
+func TestIsCommandReadyFalseOutsideConnectedStates(t *testing.T) {
+	testCases := []struct {
+		name  string
+		state clientState
+	}{
+		{name: "disconnected", state: stateDisconnected},
+		{name: "connecting", state: stateConnecting},
+		{name: "waiting hello", state: stateWaitingHello},
+		{name: "waiting snapshot", state: stateWaitingSnap},
+		{name: "reconnecting", state: stateReconnecting},
+		{name: "closed", state: stateClosed},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			client := New("ws://example.invalid/ws")
+			_, sessionCancel := context.WithCancel(context.Background())
+			defer sessionCancel()
+
+			client.mu.Lock()
+			client.state = testCase.state
+			client.writeQueue = make(chan protocol.Envelope, 1)
+			client.sessionCancel = sessionCancel
+			client.mu.Unlock()
+
+			if client.IsCommandReady() {
+				t.Fatalf("state %q should not be command-ready", testCase.state)
+			}
+		})
+	}
+}
+
+func TestIsCommandReadyConnectedAfterHandshakeTrue(t *testing.T) {
+	url, closeServer := newWSTestServer(t, func(ctx context.Context, conn *websocket.Conn, _ int) {
+		defer conn.Close(websocket.StatusNormalClosure, "")
+		if err := writeHelloSnapshot(ctx, conn); err != nil {
+			return
+		}
+		<-ctx.Done()
+	})
+	defer closeServer()
+
+	client := New(url)
+	connectCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if err := client.Connect(connectCtx); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer client.Close()
+
+	waitForState(t, client, stateConnected, 2*time.Second)
+
+	if !client.IsCommandReady() {
+		t.Fatal("connected client should be command-ready after handshake")
+	}
+}
+
+func TestWebSocketReadLimitIsAboveDefaultMessageLimit(t *testing.T) {
+	const defaultReadLimitBytes int64 = 32 * 1024
+
+	if websocketReadLimitBytes <= defaultReadLimitBytes {
+		t.Fatalf("websocketReadLimitBytes = %d, want > %d", websocketReadLimitBytes, defaultReadLimitBytes)
+	}
+}
+
+func TestLargeResultPayloadAboveDefaultReadLimitIsDelivered(t *testing.T) {
+	const defaultReadLimitBytes int64 = 32 * 1024
+
+	largeEntry := strings.Repeat("x", 96*1024)
+	largeData, err := json.Marshal(map[string]any{
+		"entries": []map[string]any{
+			{
+				"seq":     101,
+				"service": "billing",
+				"stream":  "stdout",
+				"message": largeEntry,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal large data: %v", err)
+	}
+
+	if int64(len(largeData)) <= defaultReadLimitBytes {
+		t.Fatalf("large test payload = %d bytes, want > %d", len(largeData), defaultReadLimitBytes)
+	}
+	if int64(len(largeData)) >= websocketReadLimitBytes {
+		t.Fatalf("large test payload = %d bytes, want < read limit %d", len(largeData), websocketReadLimitBytes)
+	}
+
+	url, closeServer := newWSTestServer(t, func(ctx context.Context, conn *websocket.Conn, _ int) {
+		defer conn.Close(websocket.StatusNormalClosure, "")
+		if err := writeHelloSnapshot(ctx, conn); err != nil {
+			return
+		}
+
+		firstCommand, err := readEnvelope(ctx, conn)
+		if err != nil {
+			return
+		}
+		if firstCommand.Type != protocol.MessageTypeCommand {
+			return
+		}
+
+		_ = wsjson.Write(ctx, conn, protocol.NewAckEnvelope(firstCommand.ID, true, nil))
+		_ = wsjson.Write(ctx, conn, protocol.NewResultEnvelope(firstCommand.ID, true, nil, nil, largeData))
+
+		secondCommand, err := readEnvelope(ctx, conn)
+		if err != nil {
+			return
+		}
+		if secondCommand.Type != protocol.MessageTypeCommand {
+			return
+		}
+
+		_ = wsjson.Write(ctx, conn, protocol.NewAckEnvelope(secondCommand.ID, true, nil))
+		_ = wsjson.Write(ctx, conn, protocol.NewResultEnvelope(secondCommand.ID, true, nil, nil, json.RawMessage(`{"ok":true}`)))
+
+		<-ctx.Done()
+	})
+	defer closeServer()
+
+	client := New(url)
+	connectCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := client.Connect(connectCtx); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer client.Close()
+
+	firstResultCh, err := client.SendCommand(context.Background(), "get_logs", map[string]any{
+		"scope":      "service",
+		"service":    "billing",
+		"before_seq": 200,
+		"limit":      200,
+	})
+	if err != nil {
+		t.Fatalf("first send command: %v", err)
+	}
+
+	firstResult, ok := recvResult(t, firstResultCh, 2*time.Second)
+	if !ok {
+		t.Fatal("expected first command result value")
+	}
+	if firstResult.Invalidated {
+		t.Fatalf("first command was invalidated, got %+v", firstResult)
+	}
+	if !firstResult.Accepted {
+		t.Fatalf("first command expected Accepted=true, got %+v", firstResult)
+	}
+	if firstResult.Result == nil {
+		t.Fatalf("first command expected non-nil Result, got %+v", firstResult)
+	}
+	if int64(len(firstResult.Result.Data)) <= defaultReadLimitBytes {
+		t.Fatalf("first result data size = %d bytes, want > %d", len(firstResult.Result.Data), defaultReadLimitBytes)
+	}
+	if !strings.Contains(string(firstResult.Result.Data), largeEntry[:64]) {
+		t.Fatal("first result data missing expected large log content")
+	}
+
+	_, ok = recvResult(t, firstResultCh, 2*time.Second)
+	if ok {
+		t.Fatal("expected first command channel to be closed")
+	}
+
+	secondResultCh, err := client.SendCommand(context.Background(), "get_logs", map[string]any{
+		"scope":      "service",
+		"service":    "billing",
+		"before_seq": 100,
+		"limit":      10,
+	})
+	if err != nil {
+		t.Fatalf("second send command: %v", err)
+	}
+
+	secondResult, ok := recvResult(t, secondResultCh, 2*time.Second)
+	if !ok {
+		t.Fatal("expected second command result value")
+	}
+	if secondResult.Invalidated {
+		t.Fatalf("second command was invalidated, got %+v", secondResult)
+	}
+	if !secondResult.Accepted {
+		t.Fatalf("second command expected Accepted=true, got %+v", secondResult)
+	}
+	if secondResult.Result == nil {
+		t.Fatalf("second command expected non-nil Result, got %+v", secondResult)
+	}
+	if !strings.Contains(string(secondResult.Result.Data), `"ok":true`) {
+		t.Fatalf("second result payload = %s, missing expected marker", string(secondResult.Result.Data))
+	}
+
+	_, ok = recvResult(t, secondResultCh, 2*time.Second)
+	if ok {
+		t.Fatal("expected second command channel to be closed")
+	}
+}
+
 func TestConnectInjectsAuthorizationHeader(t *testing.T) {
 	const bearerToken = "fl_test_wsclient_token"
 

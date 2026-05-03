@@ -268,6 +268,7 @@ type model struct {
 	seenLogSeqs          map[int64]struct{}
 	replayPending        bool
 	logsTruncated        bool
+	initialLogsLoading   bool
 	loadingOlderLogs     bool
 	noOlderLogsAvailable bool
 	effectiveLogLimit    *int
@@ -347,13 +348,20 @@ func (model model) fetchServiceLogsCmd(serviceName string) tea.Cmd {
 	client := model.client
 	name := model.fetchRequestTargetForSelection(serviceName)
 	requestSeq := model.lastSeq
+	selectedAtFetch := model.selectedServiceName()
+	requestedServiceName := strings.TrimSpace(serviceName)
+	payloadServiceName := strings.TrimSpace(name)
+	clientReady := client != nil
 
 	return func() tea.Msg {
 		if client == nil {
-			return serviceLogsLoadedMsg{serviceName: name, result: ServiceLogsFetchResult{Status: ServiceLogsFetchError}, requestSeq: requestSeq}
+			result := ServiceLogsFetchResult{Status: ServiceLogsFetchError, FailureReason: runCommandFailureClientNil}
+			result = withBaseFetchDiagnostics(result, logsFetchKindInitial, requestedServiceName, payloadServiceName, selectedAtFetch, clientReady)
+			return serviceLogsLoadedMsg{serviceName: name, result: result, requestSeq: requestSeq}
 		}
 
 		result := fetchLogs(context.Background(), client, name)
+		result = withBaseFetchDiagnostics(result, logsFetchKindInitial, requestedServiceName, payloadServiceName, selectedAtFetch, clientReady)
 		return serviceLogsLoadedMsg{serviceName: name, result: result, requestSeq: requestSeq}
 	}
 }
@@ -362,13 +370,18 @@ func (model model) fetchGlobalLogsCmd() tea.Cmd {
 	client := model.client
 	serviceName := model.fetchRequestTargetForSelection(allLogsName)
 	requestSeq := model.lastSeq
+	selectedAtFetch := model.selectedServiceName()
+	clientReady := client != nil
 
 	return func() tea.Msg {
 		if client == nil {
-			return serviceLogsLoadedMsg{serviceName: allLogsName, result: ServiceLogsFetchResult{Status: ServiceLogsFetchError}, requestSeq: requestSeq}
+			result := ServiceLogsFetchResult{Status: ServiceLogsFetchError, FailureReason: runCommandFailureClientNil}
+			result = withBaseFetchDiagnostics(result, logsFetchKindInitial, allLogsName, serviceName, selectedAtFetch, clientReady)
+			return serviceLogsLoadedMsg{serviceName: allLogsName, result: result, requestSeq: requestSeq}
 		}
 
 		result := fetchLogs(context.Background(), client, serviceName)
+		result = withBaseFetchDiagnostics(result, logsFetchKindInitial, allLogsName, serviceName, selectedAtFetch, clientReady)
 		return serviceLogsLoadedMsg{serviceName: allLogsName, result: result, requestSeq: requestSeq}
 	}
 }
@@ -377,13 +390,21 @@ func (model model) fetchReplayLogsCmd(afterSeq int64) tea.Cmd {
 	client := model.client
 	cursor := afterSeq
 	serviceName := model.replayFetchRequestTarget()
+	selectedAtFetch := model.selectedServiceName()
+	requestedServiceName := selectedAtFetch
+	payloadServiceName := strings.TrimSpace(serviceName)
+	clientReady := client != nil
 
 	return func() tea.Msg {
 		if client == nil {
-			return replayLogsLoadedMsg{serviceName: serviceName, result: ServiceLogsFetchResult{Status: ServiceLogsFetchError}}
+			result := ServiceLogsFetchResult{Status: ServiceLogsFetchError, FailureReason: runCommandFailureClientNil}
+			result = withBaseFetchDiagnostics(result, logsFetchKindReplay, requestedServiceName, payloadServiceName, selectedAtFetch, clientReady)
+			result.Diagnostics.AfterSeq = cursor
+			return replayLogsLoadedMsg{serviceName: serviceName, result: result}
 		}
 
 		result := fetchLogsAfter(context.Background(), client, serviceName, cursor)
+		result = withBaseFetchDiagnostics(result, logsFetchKindReplay, requestedServiceName, payloadServiceName, selectedAtFetch, clientReady)
 		return replayLogsLoadedMsg{serviceName: serviceName, result: result}
 	}
 }
@@ -396,6 +417,13 @@ func (model model) fetchReplayLogsCmd(afterSeq int64) tea.Cmd {
 func (model model) fetchOlderLogsCmd(serviceName string, beforeSeq int64) tea.Cmd {
 	client := model.client
 	targetService := model.fetchRequestTargetForSelection(serviceName)
+	selectedAtFetch := model.selectedServiceName()
+	requestedServiceName := strings.TrimSpace(serviceName)
+	payloadServiceName := strings.TrimSpace(targetService)
+	clientReady := client != nil
+	lowestAtFetch := lowestSeq(model.logEntries)
+	logEntriesLenAtFetch := len(model.logEntries)
+	effectiveLimitAtFetch := copyIntPointer(model.effectiveLogLimit)
 	pageLimit := 0
 	if model.effectiveLogLimit != nil && *model.effectiveLogLimit > 0 {
 		pageLimit = *model.effectiveLogLimit
@@ -403,11 +431,36 @@ func (model model) fetchOlderLogsCmd(serviceName string, beforeSeq int64) tea.Cm
 
 	return func() tea.Msg {
 		if client == nil {
-			return olderLogsLoadedMsg{serviceName: serviceName, beforeSeq: beforeSeq, result: ServiceLogsFetchResult{Status: ServiceLogsFetchError}}
+			result := ServiceLogsFetchResult{Status: ServiceLogsFetchError, FailureReason: runCommandFailureClientNil}
+			result = withBaseFetchDiagnostics(result, logsFetchKindOlder, requestedServiceName, payloadServiceName, selectedAtFetch, clientReady)
+			result.Diagnostics.BeforeSeq = beforeSeq
+			result.Diagnostics.Limit = pageLimit
+			result.Diagnostics.EffectiveLogLimitAtFetch = copyIntPointer(effectiveLimitAtFetch)
+			result.Diagnostics.LowestSeqAtFetch = lowestAtFetch
+			result.Diagnostics.LogEntriesLenAtFetch = logEntriesLenAtFetch
+			return olderLogsLoadedMsg{serviceName: serviceName, beforeSeq: beforeSeq, result: result}
 		}
 		result := fetchLogsBefore(context.Background(), client, targetService, beforeSeq, pageLimit)
+		result = withBaseFetchDiagnostics(result, logsFetchKindOlder, requestedServiceName, payloadServiceName, selectedAtFetch, clientReady)
+		result.Diagnostics.BeforeSeq = beforeSeq
+		result.Diagnostics.Limit = pageLimit
+		result.Diagnostics.EffectiveLogLimitAtFetch = copyIntPointer(effectiveLimitAtFetch)
+		result.Diagnostics.LowestSeqAtFetch = lowestAtFetch
+		result.Diagnostics.LogEntriesLenAtFetch = logEntriesLenAtFetch
 		return olderLogsLoadedMsg{serviceName: serviceName, beforeSeq: beforeSeq, result: result}
 	}
+}
+
+func withBaseFetchDiagnostics(result ServiceLogsFetchResult, kind string, requestedServiceName string, payloadServiceName string, selectedAtFetch string, clientReady bool) ServiceLogsFetchResult {
+	result.Diagnostics.Kind = normalizeFetchKind(kind)
+	if strings.TrimSpace(result.Diagnostics.CommandID) == "" {
+		result.Diagnostics.CommandID = commandIDUnavailable
+	}
+	result.Diagnostics.RequestedServiceName = strings.TrimSpace(requestedServiceName)
+	result.Diagnostics.PayloadServiceName = strings.TrimSpace(payloadServiceName)
+	result.Diagnostics.ClientReady = clientReady
+	result.Diagnostics.SelectedServiceAtFetch = strings.TrimSpace(selectedAtFetch)
+	return result
 }
 
 func (model model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
@@ -426,6 +479,7 @@ func (model model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case connectDoneMsg:
 		model.connectionLabel = connectionLabelForStatus(message.result.Status)
 		if message.result.Status == StatusConnected {
+			model.initialLogsLoading = false
 			if message.client != nil {
 				model.client = message.client
 				model.events = message.client.Events()
@@ -451,6 +505,7 @@ func (model model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			model.lastSeq = 0
 			model.resetSeenLogSeqs()
 			model.replayPending = false
+			model.initialLogsLoading = false
 			model.resetBusyServices()
 			model.resetRestartingServices()
 			model.setLogsViewportContent()
@@ -464,6 +519,7 @@ func (model model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			model.client = nil
 			model.events = nil
 			model.replayPending = false
+			model.initialLogsLoading = false
 			model.setEffectiveLogLimit(nil)
 			model.setPersistentFooter("connection closed")
 			break
@@ -474,11 +530,11 @@ func (model model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		switch strings.TrimSpace(message.event.Name) {
 		case "hello":
 			if _, ok := decodeHelloEvent(message.event); ok {
-				model.connectionLabel = "Connected"
 				model.replayPending = true
 			}
 		case "snapshot":
 			if services, ok := decodeSnapshotEvent(message.event); ok {
+				model.connectionLabel = "Connected"
 				model.serviceItems = serviceItemsFromServices(services)
 				model.serviceSelection = clampSelection(model.serviceSelection, len(model.filteredServices()))
 				model.refreshBusyServicesFromItems()
@@ -507,6 +563,10 @@ func (model model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 
 		messageCmd = batchCmds(model.readEventCmd(), replayCmd)
 	case serviceLogsLoadedMsg:
+		message.result.Diagnostics.SelectedServiceAtResponse = model.selectedServiceName()
+			if message.serviceName == model.selectedServiceName() {
+				model.initialLogsLoading = false
+			}
 		if message.result.Status == ServiceLogsFetchOK {
 			loadedLogs := dedupeLogsBySeq(message.result.Logs)
 			model.updateLastSeqFromLogs(loadedLogs)
@@ -517,14 +577,11 @@ func (model model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				model.logEntries = mergeLoadedAndLiveLogsWithinLimit(loadedLogs, liveLogs, model.effectiveLogLimit)
 				model.logsTruncated = message.result.Truncated
 				model.rebuildSeenLogSeqs()
-				if loadedCount > 0 {
-					// Keep freshly loaded history visible instead of immediately
-					// snapping back to the live tail.
-					model.logsFollow = false
-				}
+				// Initial loads should behave like tail -f: show the latest
+				// buffered entries and keep follow mode enabled.
+				model.logsFollow = true
 				model.setLogsViewportContent()
 				if loadedCount > 0 {
-					model.logsViewport.SetYOffset(0)
 					messageCmd = batchCmds(messageCmd, model.setTransientFooter(fmt.Sprintf("loaded %d historical entries", loadedCount)))
 				}
 			}
@@ -548,6 +605,7 @@ func (model model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case replayLogsLoadedMsg:
+		message.result.Diagnostics.SelectedServiceAtResponse = model.selectedServiceName()
 		currentSelection := model.selectedServiceName()
 		if currentSelection == "" {
 			break
@@ -577,6 +635,7 @@ func (model model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			model.setLogsViewportContent()
 		}
 	case olderLogsLoadedMsg:
+		message.result.Diagnostics.SelectedServiceAtResponse = model.selectedServiceName()
 		// Backward pagination: clear the in-flight flag, then merge older
 		// entries into logEntries while preserving the user's scroll position
 		// in the viewport. We do not flip `loadingOlderLogs` until we are
@@ -590,7 +649,7 @@ func (model model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if message.result.Status != ServiceLogsFetchOK {
 			// Best-effort: a failure here just means the user can retry by
 			// scrolling up again. Keep the existing buffer as-is.
-			messageCmd = batchCmds(messageCmd, model.setTransientFooter("older logs fetch failed"))
+			messageCmd = batchCmds(messageCmd, model.setTransientFooter(olderLogsFailureFooter(message.result)))
 			break
 		}
 
@@ -765,15 +824,19 @@ func (model model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		model.logEntries = nil
 		model.resetSeenLogSeqs()
 		model.logsTruncated = false
+		model.initialLogsLoading = false
 		model.loadingOlderLogs = false
 		model.noOlderLogsAvailable = false
 		model.setEffectiveLogLimit(nil)
+		model.logsFollow = true
 		model.setLogsViewportContent()
 		if selectedAfter == "" {
 		} else if isAllLogsItem(selectedAfter) {
 			selectionLogsCmd = model.fetchGlobalLogsCmd()
+			model.initialLogsLoading = true
 		} else {
 			selectionLogsCmd = model.fetchServiceLogsCmd(selectedAfter)
+			model.initialLogsLoading = true
 		}
 	}
 
@@ -1828,7 +1891,7 @@ func (model *model) updateLastSeqFromLogs(logs []ServiceLog) {
 // flight, and we have not already learned that the server has nothing older.
 // The lowest seq in the current buffer becomes the `before_seq` cursor.
 func (model *model) maybeRequestOlderLogs() (tea.Cmd, bool) {
-	if model.loadingOlderLogs || model.noOlderLogsAvailable {
+	if model.initialLogsLoading || model.loadingOlderLogs || model.noOlderLogsAvailable {
 		return nil, false
 	}
 	if !model.isLogsViewportNearTop() {
@@ -1844,6 +1907,12 @@ func (model *model) maybeRequestOlderLogs() (tea.Cmd, bool) {
 
 	beforeSeq := lowestSeq(model.logEntries)
 	if beforeSeq <= 0 {
+		return nil, false
+	}
+	if model.client == nil {
+		return nil, false
+	}
+	if !model.client.IsCommandReady() {
 		return nil, false
 	}
 
@@ -2395,6 +2464,14 @@ func footerMessageExpiryCmd(token int) tea.Cmd {
 	return tea.Tick(actionFooterTTL, func(time.Time) tea.Msg {
 		return footerMessageExpiredMsg{token: token}
 	})
+}
+
+func olderLogsFailureFooter(result ServiceLogsFetchResult) string {
+	reason := strings.TrimSpace(result.FailureReason)
+	if reason == "" {
+		return "older logs fetch failed"
+	}
+	return "older logs fetch failed: " + reason
 }
 
 func (model *model) setPersistentFooter(message string) {
