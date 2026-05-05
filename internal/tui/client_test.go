@@ -3,7 +3,10 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/FlowLayer/tui/internal/wsclient"
 )
@@ -120,12 +123,18 @@ func TestFetchLogsWithoutClient(t *testing.T) {
 	if result.Status != ServiceLogsFetchRequestFailed {
 		t.Fatalf("status = %q, want %q", result.Status, ServiceLogsFetchRequestFailed)
 	}
+	if !strings.Contains(strings.ToLower(result.FailureReason), "client nil") {
+		t.Fatalf("failure reason = %q, want to contain %q", result.FailureReason, "client nil")
+	}
 }
 
 func TestFetchLogsAfterWithoutClient(t *testing.T) {
 	result := fetchLogsAfter(context.Background(), nil, "billing", 42)
 	if result.Status != ServiceLogsFetchRequestFailed {
 		t.Fatalf("status = %q, want %q", result.Status, ServiceLogsFetchRequestFailed)
+	}
+	if !strings.Contains(strings.ToLower(result.FailureReason), "client nil") {
+		t.Fatalf("failure reason = %q, want to contain %q", result.FailureReason, "client nil")
 	}
 }
 
@@ -191,6 +200,110 @@ func TestFetchLogsBeforeWithoutClient(t *testing.T) {
 	result := fetchLogsBefore(context.Background(), nil, "billing", 99, 100)
 	if result.Status != ServiceLogsFetchRequestFailed {
 		t.Fatalf("status = %q, want %q", result.Status, ServiceLogsFetchRequestFailed)
+	}
+	if !strings.Contains(strings.ToLower(result.FailureReason), "client nil") {
+		t.Fatalf("failure reason = %q, want to contain %q", result.FailureReason, "client nil")
+	}
+}
+
+func TestRunCommandDetailedWithSenderTimeoutReason(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	defer cancel()
+
+	_, ok, reason := runCommandDetailedWithSender(
+		ctx,
+		&wsclient.Client{},
+		"get_logs",
+		nil,
+		func(context.Context, *wsclient.Client, string, any) (<-chan wsclient.CommandResult, error) {
+			return make(chan wsclient.CommandResult), nil
+		},
+	)
+
+	if ok {
+		t.Fatal("expected timeout to fail")
+	}
+	if !strings.Contains(strings.ToLower(reason), "timeout") {
+		t.Fatalf("reason = %q, want to contain %q", reason, "timeout")
+	}
+}
+
+func TestRunCommandDetailedWithSenderInvalidatedReason(t *testing.T) {
+	_, ok, reason := runCommandDetailedWithSender(
+		context.Background(),
+		&wsclient.Client{},
+		"get_logs",
+		nil,
+		func(context.Context, *wsclient.Client, string, any) (<-chan wsclient.CommandResult, error) {
+			resultCh := make(chan wsclient.CommandResult, 1)
+			resultCh <- wsclient.CommandResult{Invalidated: true}
+			return resultCh, nil
+		},
+	)
+
+	if ok {
+		t.Fatal("expected invalidated result to fail")
+	}
+	if !strings.Contains(strings.ToLower(reason), "invalidated") {
+		t.Fatalf("reason = %q, want to contain %q", reason, "invalidated")
+	}
+}
+
+func TestRunCommandDetailedWithSenderSendErrorReason(t *testing.T) {
+	_, ok, reason := runCommandDetailedWithSender(
+		context.Background(),
+		&wsclient.Client{},
+		"get_logs",
+		nil,
+		func(context.Context, *wsclient.Client, string, any) (<-chan wsclient.CommandResult, error) {
+			return nil, errors.New("boom")
+		},
+	)
+
+	if ok {
+		t.Fatal("expected send error to fail")
+	}
+	if !strings.Contains(strings.ToLower(reason), "send command error") {
+		t.Fatalf("reason = %q, want to contain %q", reason, "send command error")
+	}
+	if !strings.Contains(strings.ToLower(reason), "boom") {
+		t.Fatalf("reason = %q, want to contain %q", reason, "boom")
+	}
+}
+
+func TestFetchLogsRequestMapsTimeoutFailureReason(t *testing.T) {
+	previous := runCommandDetailedHook
+	runCommandDetailedHook = func(context.Context, *wsclient.Client, string, any) (wsclient.CommandResult, bool, string) {
+		return wsclient.CommandResult{}, false, runCommandFailureContextTimeout
+	}
+	defer func() {
+		runCommandDetailedHook = previous
+	}()
+
+	result := fetchLogsRequest(context.Background(), &wsclient.Client{}, "billing", 0, 0, 0)
+	if result.Status != ServiceLogsFetchRequestFailed {
+		t.Fatalf("status = %q, want %q", result.Status, ServiceLogsFetchRequestFailed)
+	}
+	if !strings.Contains(strings.ToLower(result.FailureReason), "timeout") {
+		t.Fatalf("failure reason = %q, want to contain %q", result.FailureReason, "timeout")
+	}
+}
+
+func TestFetchLogsRequestMapsInvalidatedFailureReason(t *testing.T) {
+	previous := runCommandDetailedHook
+	runCommandDetailedHook = func(context.Context, *wsclient.Client, string, any) (wsclient.CommandResult, bool, string) {
+		return wsclient.CommandResult{}, false, runCommandFailureResultInvalidated
+	}
+	defer func() {
+		runCommandDetailedHook = previous
+	}()
+
+	result := fetchLogsRequest(context.Background(), &wsclient.Client{}, "billing", 0, 0, 0)
+	if result.Status != ServiceLogsFetchRequestFailed {
+		t.Fatalf("status = %q, want %q", result.Status, ServiceLogsFetchRequestFailed)
+	}
+	if !strings.Contains(strings.ToLower(result.FailureReason), "invalidated") {
+		t.Fatalf("failure reason = %q, want to contain %q", result.FailureReason, "invalidated")
 	}
 }
 
