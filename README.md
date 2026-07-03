@@ -182,4 +182,4 @@ If you need any of those — write a custom client. The protocol is documented a
 
 ## License
 
-Distributed under the terms shipped with the corresponding release artifact at <https://github.com/FlowLayer/flowlayer/releases>.
+TODO: Maintainer decision required before adding a repository `LICENSE` file. This repository contains the public source for the official `flowlayer-client-tui` terminal client; it does not publish or change the license of the proprietary FlowLayer server runtime.
