@@ -182,4 +182,8 @@ If you need any of those — write a custom client. The protocol is documented a
 
 ## License
 
-Distributed under the terms shipped with the corresponding release artifact at <https://github.com/FlowLayer/flowlayer/releases>.
+The official FlowLayer TUI client (`flowlayer-client-tui`) is released under the Apache License 2.0. See [`LICENSE`](LICENSE).
+
+This license applies to this TUI client repository only. The FlowLayer runtime/server remains proprietary.
+
+The FlowLayer protocol and configuration contract are documented publicly so client implementations can interoperate with the server; see [PROTOCOL.md](https://github.com/FlowLayer/flowlayer/blob/main/PROTOCOL.md) and [BUILDING-A-CLIENT.md](https://github.com/FlowLayer/flowlayer/blob/main/BUILDING-A-CLIENT.md).
